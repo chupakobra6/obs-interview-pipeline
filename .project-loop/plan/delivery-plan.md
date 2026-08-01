@@ -13,6 +13,8 @@
 | STEP-002A | `готово` | REQ-007..REQ-009, CON-004 | Добавить локальный ASR-контракт Telegram Harvest, удалить дублирование из OBS, сделать notification кликабельным и обновить DX/CI/docs. | Self-review общего контракта, migration config и notification target. | Focused/unit/race checks обоих репозиториев зелёные. |
 | STEP-002B | `готово` | VAL-004, VAL-005 | Установить current-head pipeline и провести реальный E2E плюс UI click test. | Сопоставить command output, manifest, ffprobe, source lifecycle и Finder state. | Сквозной прогон через Telegram Harvest и клик notification подтверждены. |
 | STEP-002R | `готово` | REQ-007..REQ-009 | Финальный review, cleanup, evidence, focused commits и handoff. | Проверка diff, docs/CI, installed state и residual risks. | Все checks зелёные; два локальных commits; clean owned paths. |
+| STEP-003A | `готово` | REQ-010, VAL-006..VAL-007 | Провести реальное собеседование через pipeline, затем выполнить tooling-review и repo-polish. | Проверить stage evidence, runtime residue, native helper lifecycle и CI contract. | Реальный job зелёный; безопасные review fixes реализованы. |
+| STEP-003R | `готово` | REQ-008..REQ-010 | Удалить disposable state, переустановить current head и закрыть репозиторий clean commit. | Повторный inventory repo/runtime/processes и installed-state readback. | В runtime остаются только реальные артефакты; checks и Git status зелёные. |
 
 ## Примечания По Порядку
 - Шаги достаточно маленькие для цикла: реализация, ревью, исправление, проверка, коммит, handoff.

@@ -19,6 +19,8 @@
 | S002 | local inspection | 2026-08-01 | OBS profile, display metadata, Telegram Harvest runtime | принято | Подтверждены разрешения, OBS 32.2.1, ffmpeg VideoToolbox и готовый локальный Whisper runtime. |
 | S003 | user delta | 2026-08-01 | `.project-loop/intake/user-deltas.md` | принято | Канонический ASR должен жить в Telegram Harvest; macOS notification открывает каталог результата; новый проект оформляется как соседние Go-репозитории. |
 | S004 | user delta | 2026-08-01 | `.project-loop/intake/user-deltas.md` | принято | Notification остаётся временным, но helper живёт до клика, чтобы карточка из Центра уведомлений позже открыла папку. |
+| S005 | user delta | 2026-08-01 | `.project-loop/intake/user-deltas.md` | принято | Последнее реальное видео в Movies явно разрешено провести через pipeline с обычным delete gate. |
+| S006 | user delta | 2026-08-01 | `.project-loop/intake/user-deltas.md` | принято | Провести tooling-review, repo-polish и удалить созданные проверками артефакты без затрагивания реального результата. |
 
 ## Конфликты
 | Источники | Решение | Дата |

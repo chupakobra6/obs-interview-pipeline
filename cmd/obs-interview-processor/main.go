@@ -182,16 +182,20 @@ func doctor(ctx context.Context, cfg config.Config, stdout io.Writer) error {
 		Detail string `json:"detail"`
 	}
 	var checks []check
-	for name, path := range map[string]string{
-		"ffmpeg":                 cfg.FFmpegCommand,
-		"ffprobe":                cfg.FFprobeCommand,
-		"make":                   cfg.MakeCommand,
-		"telegram-harvest":       cfg.TelegramHarvestCommand,
-		"obs-interview-notifier": cfg.NotifierCommand,
-		"swiftc":                 "/usr/bin/swiftc",
-	} {
-		info, err := os.Stat(path)
-		checks = append(checks, check{Name: name, OK: err == nil && !info.IsDir(), Detail: path})
+	toolChecks := []struct {
+		name string
+		path string
+	}{
+		{name: "ffmpeg", path: cfg.FFmpegCommand},
+		{name: "ffprobe", path: cfg.FFprobeCommand},
+		{name: "make", path: cfg.MakeCommand},
+		{name: "telegram-harvest", path: cfg.TelegramHarvestCommand},
+		{name: "obs-interview-notifier", path: cfg.NotifierCommand},
+		{name: "swiftc", path: "/usr/bin/swiftc"},
+	}
+	for _, tool := range toolChecks {
+		info, err := os.Stat(tool.path)
+		checks = append(checks, check{Name: tool.name, OK: err == nil && !info.IsDir(), Detail: tool.path})
 	}
 	rootInfo, rootErr := os.Stat(cfg.TelegramHarvestRoot)
 	checks = append(checks, check{Name: "telegram-harvest-root", OK: rootErr == nil && rootInfo.IsDir(), Detail: cfg.TelegramHarvestRoot})
@@ -247,23 +251,30 @@ func runQueue(ctx context.Context, cfg config.Config, stdout, stderr io.Writer) 
 			}
 			if processErr != nil {
 				fmt.Fprintf(stderr, "%s failed %s: %v\n", time.Now().Format(time.RFC3339), job.Path, processErr)
-				notify(cfg, "Ошибка обработки OBS", filepath.Base(job.Path)+": "+processErr.Error(), filepath.Dir(job.Path))
+				if notifyErr := notify(cfg, "Ошибка обработки OBS", filepath.Base(job.Path)+": "+processErr.Error(), filepath.Dir(job.Path)); notifyErr != nil {
+					fmt.Fprintf(stderr, "%s notification failed: %v\n", time.Now().Format(time.RFC3339), notifyErr)
+				}
 				continue
 			}
 			fmt.Fprintf(stdout, "%s completed %s -> %s (%d -> %d bytes)\n", time.Now().Format(time.RFC3339), job.Path, result.FinalDir, result.SourceBytes, result.OutputBytes)
-			notify(cfg, "Запись OBS обработана", filepath.Base(job.Path)+" — видео и расшифровка готовы", result.FinalDir)
+			if notifyErr := notify(cfg, "Запись OBS обработана", filepath.Base(job.Path)+" — видео и расшифровка готовы", result.FinalDir); notifyErr != nil {
+				fmt.Fprintf(stderr, "%s notification failed: %v\n", time.Now().Format(time.RFC3339), notifyErr)
+			}
 		}
 		return nil
 	})
 }
 
-func notify(cfg config.Config, title, message, targetDir string) {
+func notify(cfg config.Config, title, message, targetDir string) error {
 	if !cfg.Notifications {
-		return
+		return nil
 	}
 	appPath := notifierApplicationPath(cfg.NotifierCommand)
 	args := append([]string{"-n", appPath, "--args"}, notificationArgs(title, message, targetDir)...)
-	_ = exec.Command("/usr/bin/open", args...).Run()
+	if output, err := exec.Command("/usr/bin/open", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("launch notifier app: %w: %s", err, oneLineDetail(string(output)))
+	}
+	return nil
 }
 
 func notificationArgs(title, message, targetDir string) []string {

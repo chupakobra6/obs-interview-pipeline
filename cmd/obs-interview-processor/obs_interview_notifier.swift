@@ -66,6 +66,19 @@ func fail(_ message: String) -> Never {
     exit(1)
 }
 
+func monitorNotification(_ center: UNUserNotificationCenter, identifier: String) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
+        center.getDeliveredNotifications { notifications in
+            let isDelivered = notifications.contains { $0.request.identifier == identifier }
+            if isDelivered {
+                monitorNotification(center, identifier: identifier)
+            } else {
+                DispatchQueue.main.async { NSApp.terminate(nil) }
+            }
+        }
+    }
+}
+
 guard let arguments = Arguments.parse(Array(CommandLine.arguments.dropFirst())) else {
     fail("usage: obs-interview-notifier --title TITLE --message MESSAGE --open-dir DIRECTORY")
 }
@@ -93,6 +106,7 @@ center.requestAuthorization(options: [.alert, .sound]) { granted, error in
         if let addError = addError {
             fail("deliver notification: \(addError)")
         }
+        monitorNotification(center, identifier: request.identifier)
     }
 }
 

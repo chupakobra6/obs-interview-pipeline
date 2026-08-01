@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     timeout-minutes: 15
 
     steps:
@@ -28,16 +28,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Verify module files
-        run: |
-          go mod tidy
-          git diff --exit-code -- go.mod go.sum
-
-      - name: Build
-        run: go build ./cmd/obs-interview-processor
-
-      - name: Vet
-        run: go vet ./...
+      - name: Check
+        run: make check
 
       - name: Test with race detector
-        run: go test -race ./...
+        run: make test-race
