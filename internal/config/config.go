@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	CurrentVersion   = 4
+	CurrentVersion   = 5
 	AppDirName       = "obs-interview-pipeline"
 	ConfigFileName   = "config.json"
 	LaunchAgentLabel = "com.igor.obs-interview-processor"
@@ -27,6 +27,7 @@ type Config struct {
 	TelegramHarvestCommand string `json:"telegram_harvest_command"`
 	MakeCommand            string `json:"make_command"`
 	NotifierCommand        string `json:"notifier_command"`
+	PromptCommand          string `json:"prompt_command"`
 	OutputWidth            int    `json:"output_width"`
 	OutputHeight           int    `json:"output_height"`
 	OutputFPS              int    `json:"output_fps"`
@@ -50,6 +51,7 @@ func Default(home string) Config {
 		TelegramHarvestCommand: filepath.Join(harvest, "bin", "telegram-harvest"),
 		MakeCommand:            "/usr/bin/make",
 		NotifierCommand:        filepath.Join(appSupport, "OBS Interview Notifier.app", "Contents", "MacOS", "obs-interview-notifier"),
+		PromptCommand:          filepath.Join(appSupport, "OBS Interview Prompt.app", "Contents", "MacOS", "obs-interview-prompt"),
 		OutputWidth:            1512,
 		OutputHeight:           982,
 		OutputFPS:              30,
@@ -102,6 +104,7 @@ func LoadForInstall(path string, defaults Config) (Config, error) {
 	cfg.Version = CurrentVersion
 	if stored.Version < CurrentVersion {
 		cfg.NotifierCommand = defaults.NotifierCommand
+		cfg.PromptCommand = defaults.PromptCommand
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -168,6 +171,7 @@ func (c Config) Validate() error {
 		"telegram_harvest_command": c.TelegramHarvestCommand,
 		"make_command":             c.MakeCommand,
 		"notifier_command":         c.NotifierCommand,
+		"prompt_command":           c.PromptCommand,
 	} {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("config %s is empty", name)

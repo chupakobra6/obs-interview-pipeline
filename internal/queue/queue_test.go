@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/chupakobra6/obs-interview-pipeline/internal/config"
+	"github.com/chupakobra6/obs-interview-pipeline/internal/policy"
 )
 
 func TestQueueLifecycle(t *testing.T) {
@@ -16,7 +17,8 @@ func TestQueueLifecycle(t *testing.T) {
 	if err := os.WriteFile(recording, []byte("recording"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	job, err := Enqueue(cfg, recording)
+	options := policy.Options{DeleteSource: false, AudioMode: policy.AudioPreserve}
+	job, err := Enqueue(cfg, recording, options)
 	if err != nil {
 		t.Fatalf("Enqueue() error = %v", err)
 	}
@@ -25,7 +27,7 @@ func TestQueueLifecycle(t *testing.T) {
 		t.Fatalf("Pending() = %v, %v", paths, err)
 	}
 	read, err := Read(paths[0])
-	if err != nil || read.ID != job.ID || read.Path != recording {
+	if err != nil || read.ID != job.ID || read.Path != recording || read.Options != options {
 		t.Fatalf("Read() = %#v, %v", read, err)
 	}
 	jobErr := errors.New("synthetic failure")

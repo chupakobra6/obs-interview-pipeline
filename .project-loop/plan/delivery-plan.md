@@ -18,6 +18,9 @@
 | STEP-004A | `готово` | REQ-011..REQ-013 | Добавить Harvest assume-speech контракт, условный video fast path и master AAC 96; применить HEVC VideoToolbox в OBS. | Self-review единственного источника ASR-настроек, ffmpeg mapping/filter decisions и OBS readback. | Focused/unit/race checks обоих репозиториев и OBS config readback зелёные. |
 | STEP-004B | `готово` | VAL-008 | Провести короткий реальный OBS E2E через установленный current-head pipeline. | Сопоставить manifest, ffprobe, logs, source lifecycle и notification process. | HEVC source → video copy final; ASR без gate; один AAC target 96; disposable artifacts очищены. |
 | STEP-004R | `готово` | REQ-010..REQ-013 | Выполнить tooling-review/repo-polish, current-head checks, focused commits и handoff. | Проверить diffs, docs, installed/runtime state и остаточные риски. | Focused commits; checks/doctor/loop validate зелёные; тестовый мусор отсутствует. |
+| STEP-005A | `готово` | REQ-014..REQ-016 | Диагностировать начало ASR; добавить per-job policy, preserve/merge audio и native post-recording prompt. | Self-review audio selection, non-blocking UI launch, cancel/delete safety и single source of truth. | Focused tests и реальный diagnostic sample зелёные. |
+| STEP-005B | `готово` | VAL-009 | Установить current head и провести OBS UI/E2E проверки prompt и audio lifecycle. | Сопоставить OBS logs, dialog state, queue job, ffprobe, manifest и source lifecycle. | Cancel/process paths и preserve/merge contracts подтверждены. |
+| STEP-005R | `готово` | REQ-010, REQ-014..REQ-016 | Финальный review, cleanup, docs, validation и focused commit. | Проверить diff, installed/runtime state и остаточные риски. | Full/race checks, doctor и loop validate зелёные; disposable artifacts перемещены в Корзину. |
 
 ## Примечания По Порядку
 - Шаги достаточно маленькие для цикла: реализация, ревью, исправление, проверка, коммит, handoff.

@@ -13,25 +13,28 @@ import (
 	"github.com/chupakobra6/obs-interview-pipeline/internal/asr"
 	"github.com/chupakobra6/obs-interview-pipeline/internal/config"
 	"github.com/chupakobra6/obs-interview-pipeline/internal/media"
+	"github.com/chupakobra6/obs-interview-pipeline/internal/policy"
 )
 
 type Compressor interface {
-	Compress(context.Context, string, string, media.Probe) (Compression, error)
+	Compress(context.Context, string, string, media.Probe, policy.Options) (Compression, error)
 }
 
 type Compression struct {
-	VideoMode        string   `json:"video_mode"`
-	VideoFilters     []string `json:"video_filters,omitempty"`
-	AudioTrack       int      `json:"audio_track"`
-	AudioBitrateKbps int      `json:"audio_bitrate_kbps"`
+	VideoMode         string   `json:"video_mode"`
+	VideoFilters      []string `json:"video_filters,omitempty"`
+	AudioMode         string   `json:"audio_mode"`
+	SourceAudioTracks int      `json:"source_audio_tracks"`
+	OutputAudioTracks int      `json:"output_audio_tracks"`
+	AudioBitrateKbps  int      `json:"audio_bitrate_kbps"`
 }
 
 type FFmpegCompressor struct {
 	Config config.Config
 }
 
-func (c FFmpegCompressor) Compress(ctx context.Context, inputPath, outputPath string, source media.Probe) (Compression, error) {
-	compression, args, err := c.command(inputPath, outputPath, source)
+func (c FFmpegCompressor) Compress(ctx context.Context, inputPath, outputPath string, source media.Probe, options policy.Options) (Compression, error) {
+	compression, args, err := c.command(inputPath, outputPath, source, options)
 	if err != nil {
 		return Compression{}, err
 	}
@@ -42,13 +45,16 @@ func (c FFmpegCompressor) Compress(ctx context.Context, inputPath, outputPath st
 	return compression, nil
 }
 
-func (c FFmpegCompressor) command(inputPath, outputPath string, source media.Probe) (Compression, []string, error) {
+func (c FFmpegCompressor) command(inputPath, outputPath string, source media.Probe, options policy.Options) (Compression, []string, error) {
+	if err := options.Validate(); err != nil {
+		return Compression{}, nil, err
+	}
 	video, ok := source.Video()
 	if !ok {
 		return Compression{}, nil, fmt.Errorf("source has no video stream")
 	}
 	if source.AudioCount() == 0 {
-		return Compression{}, nil, fmt.Errorf("source has no master audio stream")
+		return Compression{}, nil, fmt.Errorf("source has no audio stream")
 	}
 	filters := make([]string, 0, 2)
 	if video.Width != c.Config.OutputWidth || video.Height != c.Config.OutputHeight {
@@ -63,16 +69,33 @@ func (c FFmpegCompressor) command(inputPath, outputPath string, source media.Pro
 		videoMode = "copy"
 	}
 	compression := Compression{
-		VideoMode:        videoMode,
-		VideoFilters:     filters,
-		AudioTrack:       1,
-		AudioBitrateKbps: c.Config.AudioBitrateKbps,
+		VideoMode:         videoMode,
+		VideoFilters:      filters,
+		AudioMode:         options.AudioMode,
+		SourceAudioTracks: source.AudioCount(),
+		OutputAudioTracks: source.AudioCount(),
+		AudioBitrateKbps:  c.Config.AudioBitrateKbps,
+	}
+	if options.AudioMode == policy.AudioMerge {
+		compression.OutputAudioTracks = 1
 	}
 	args := []string{
 		"-hide_banner", "-loglevel", "error", "-nostdin", "-y",
 		"-i", inputPath,
-		"-map", "0:v:0", "-map", "0:a:0",
+		"-map", "0:v:0",
 		"-map_metadata", "0", "-map_chapters", "0",
+	}
+	if options.AudioMode == policy.AudioMerge && source.AudioCount() > 1 {
+		inputs := make([]string, 0, source.AudioCount())
+		for index := 0; index < source.AudioCount(); index++ {
+			inputs = append(inputs, fmt.Sprintf("[0:a:%d]", index))
+		}
+		audioFilter := fmt.Sprintf("%samix=inputs=%d:duration=longest:dropout_transition=0:normalize=1[aout]", strings.Join(inputs, ""), source.AudioCount())
+		args = append(args, "-filter_complex", audioFilter, "-map", "[aout]")
+	} else if options.AudioMode == policy.AudioMerge {
+		args = append(args, "-map", "0:a:0")
+	} else {
+		args = append(args, "-map", "0:a")
 	}
 	if len(filters) > 0 {
 		args = append(args, "-vf", strings.Join(filters, ","))
@@ -105,26 +128,28 @@ type Pipeline struct {
 }
 
 type Result struct {
-	SourcePath     string      `json:"source_path"`
-	FinalDir       string      `json:"final_dir"`
-	VideoPath      string      `json:"video_path"`
-	TranscriptPath string      `json:"transcript_path"`
-	ManifestPath   string      `json:"manifest_path"`
-	SourceBytes    int64       `json:"source_bytes"`
-	OutputBytes    int64       `json:"output_bytes"`
-	ASR            asr.Result  `json:"asr"`
-	Compression    Compression `json:"compression"`
-	CompletedAt    time.Time   `json:"completed_at"`
+	SourcePath     string         `json:"source_path"`
+	FinalDir       string         `json:"final_dir"`
+	VideoPath      string         `json:"video_path"`
+	TranscriptPath string         `json:"transcript_path"`
+	ManifestPath   string         `json:"manifest_path"`
+	SourceBytes    int64          `json:"source_bytes"`
+	OutputBytes    int64          `json:"output_bytes"`
+	ASR            asr.Result     `json:"asr"`
+	Compression    Compression    `json:"compression"`
+	Options        policy.Options `json:"options"`
+	CompletedAt    time.Time      `json:"completed_at"`
 }
 
 type manifest struct {
-	Version     int         `json:"version"`
-	SourcePath  string      `json:"source_path"`
-	SourceProbe media.Probe `json:"source_probe"`
-	OutputProbe media.Probe `json:"output_probe"`
-	ASR         asr.Result  `json:"asr"`
-	Compression Compression `json:"compression"`
-	CompletedAt time.Time   `json:"completed_at"`
+	Version     int            `json:"version"`
+	SourcePath  string         `json:"source_path"`
+	SourceProbe media.Probe    `json:"source_probe"`
+	OutputProbe media.Probe    `json:"output_probe"`
+	ASR         asr.Result     `json:"asr"`
+	Compression Compression    `json:"compression"`
+	Options     policy.Options `json:"options"`
+	CompletedAt time.Time      `json:"completed_at"`
 }
 
 func New(cfg config.Config) Pipeline {
@@ -137,7 +162,10 @@ func New(cfg config.Config) Pipeline {
 	}
 }
 
-func (p Pipeline) Process(ctx context.Context, inputPath string) (Result, error) {
+func (p Pipeline) Process(ctx context.Context, inputPath string, options policy.Options) (Result, error) {
+	if err := options.Validate(); err != nil {
+		return Result{}, err
+	}
 	resolvedInput, err := p.validateInput(inputPath)
 	if err != nil {
 		return Result{}, err
@@ -152,7 +180,7 @@ func (p Pipeline) Process(ctx context.Context, inputPath string) (Result, error)
 	finalManifest := filepath.Join(finalDir, "manifest.json")
 
 	if _, err := os.Stat(finalDir); err == nil {
-		return p.finishExisting(ctx, resolvedInput, finalDir, finalVideo, finalTranscript, finalManifest)
+		return p.finishExisting(ctx, resolvedInput, finalDir, finalVideo, finalTranscript, finalManifest, options)
 	} else if !os.IsNotExist(err) {
 		return Result{}, fmt.Errorf("inspect final directory: %w", err)
 	}
@@ -197,7 +225,7 @@ func (p Pipeline) Process(ctx context.Context, inputPath string) (Result, error)
 		asrDone <- asrOutcome{result: result, err: runErr}
 	}()
 	go func() {
-		result, compressErr := p.Compressor.Compress(workCtx, resolvedInput, tempVideo, sourceProbe)
+		result, compressErr := p.Compressor.Compress(workCtx, resolvedInput, tempVideo, sourceProbe, options)
 		compressDone <- compressOutcome{result: result, err: compressErr}
 	}()
 
@@ -230,7 +258,7 @@ func (p Pipeline) Process(ctx context.Context, inputPath string) (Result, error)
 	if err != nil {
 		return Result{}, fmt.Errorf("probe compressed output: %w", err)
 	}
-	if err := media.ValidateCompressed(sourceProbe, outputProbe, p.Config.OutputWidth, p.Config.OutputHeight, p.Config.OutputFPS, p.Config.AudioBitrateKbps); err != nil {
+	if err := media.ValidateCompressed(sourceProbe, outputProbe, p.Config.OutputWidth, p.Config.OutputHeight, p.Config.OutputFPS, p.Config.AudioBitrateKbps, compression.OutputAudioTracks); err != nil {
 		return Result{}, fmt.Errorf("validate compressed output: %w", err)
 	}
 	if err := writeTranscript(tempTranscript, stem, asrResult); err != nil {
@@ -238,12 +266,13 @@ func (p Pipeline) Process(ctx context.Context, inputPath string) (Result, error)
 	}
 	completedAt := time.Now()
 	manifestValue := manifest{
-		Version:     1,
+		Version:     2,
 		SourcePath:  resolvedInput,
 		SourceProbe: sourceProbe,
 		OutputProbe: outputProbe,
 		ASR:         asrResult,
 		Compression: compression,
+		Options:     options,
 		CompletedAt: completedAt,
 	}
 	if err := writeJSON(tempManifest, manifestValue); err != nil {
@@ -271,7 +300,7 @@ func (p Pipeline) Process(ctx context.Context, inputPath string) (Result, error)
 	if err := syncDir(p.Config.OutputDir); err != nil {
 		return Result{}, err
 	}
-	if p.Config.DeleteSourceOnSuccess {
+	if options.DeleteSource {
 		if err := p.Remove(resolvedInput); err != nil {
 			return Result{}, fmt.Errorf("processed outputs published but source deletion failed: %w", err)
 		}
@@ -286,11 +315,12 @@ func (p Pipeline) Process(ctx context.Context, inputPath string) (Result, error)
 		OutputBytes:    outputProbe.SizeBytes(),
 		ASR:            asrResult,
 		Compression:    compression,
+		Options:        options,
 		CompletedAt:    completedAt,
 	}, nil
 }
 
-func (p Pipeline) finishExisting(ctx context.Context, inputPath, finalDir, videoPath, transcriptPath, manifestPath string) (Result, error) {
+func (p Pipeline) finishExisting(ctx context.Context, inputPath, finalDir, videoPath, transcriptPath, manifestPath string, options policy.Options) (Result, error) {
 	payload, err := os.ReadFile(manifestPath)
 	if err != nil {
 		return Result{}, fmt.Errorf("final directory already exists without readable manifest: %w", err)
@@ -301,6 +331,9 @@ func (p Pipeline) finishExisting(ctx context.Context, inputPath, finalDir, video
 	}
 	if saved.SourcePath != inputPath {
 		return Result{}, fmt.Errorf("final directory belongs to different source %s", saved.SourcePath)
+	}
+	if saved.Options != options {
+		return Result{}, fmt.Errorf("existing result belongs to different processing options")
 	}
 	if _, err := os.Stat(transcriptPath); err != nil {
 		return Result{}, fmt.Errorf("existing transcript is unavailable: %w", err)
@@ -313,10 +346,10 @@ func (p Pipeline) finishExisting(ctx context.Context, inputPath, finalDir, video
 	if err != nil {
 		return Result{}, fmt.Errorf("probe source before retry deletion: %w", err)
 	}
-	if err := media.ValidateCompressed(currentSource, currentOutput, p.Config.OutputWidth, p.Config.OutputHeight, p.Config.OutputFPS, p.Config.AudioBitrateKbps); err != nil {
+	if err := media.ValidateCompressed(currentSource, currentOutput, p.Config.OutputWidth, p.Config.OutputHeight, p.Config.OutputFPS, p.Config.AudioBitrateKbps, saved.Compression.OutputAudioTracks); err != nil {
 		return Result{}, fmt.Errorf("validate existing compressed output: %w", err)
 	}
-	if p.Config.DeleteSourceOnSuccess {
+	if options.DeleteSource {
 		if err := p.Remove(inputPath); err != nil {
 			return Result{}, fmt.Errorf("delete source after existing output validation: %w", err)
 		}
@@ -331,6 +364,7 @@ func (p Pipeline) finishExisting(ctx context.Context, inputPath, finalDir, video
 		OutputBytes:    currentOutput.SizeBytes(),
 		ASR:            saved.ASR,
 		Compression:    saved.Compression,
+		Options:        saved.Options,
 		CompletedAt:    saved.CompletedAt,
 	}, nil
 }

@@ -38,7 +38,10 @@ func TestLoadForInstallMigratesLegacyWhisperConfig(t *testing.T) {
 		t.Fatalf("migration lost settings: %+v", cfg)
 	}
 	if cfg.AudioBitrateKbps != 96 {
-		t.Fatalf("migration did not apply master audio bitrate: %+v", cfg)
+		t.Fatalf("migration did not apply audio bitrate: %+v", cfg)
+	}
+	if cfg.PromptCommand != filepath.Join(dir, "Library", "Application Support", AppDirName, "OBS Interview Prompt.app", "Contents", "MacOS", "obs-interview-prompt") {
+		t.Fatalf("migration did not install prompt command: %s", cfg.PromptCommand)
 	}
 	if cfg.TelegramHarvestRoot != filepath.Join(dir, "projects", "telegram-harvest") {
 		t.Fatalf("unexpected Harvest root: %s", cfg.TelegramHarvestRoot)

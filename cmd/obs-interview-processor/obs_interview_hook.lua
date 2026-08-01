@@ -7,31 +7,31 @@ local function shell_quote(value)
     return "'" .. string.gsub(value, "'", "'\\''") .. "'"
 end
 
-local function enqueue_recording(path)
+local function prompt_recording(path)
     if path == nil or path == "" then
         obs.script_log(obs.LOG_ERROR, "OBS Interview: last recording path is empty")
         return
     end
     local command = shell_quote(processor_path)
-        .. " enqueue --config " .. shell_quote(config_path)
+        .. " prompt --config " .. shell_quote(config_path)
         .. " " .. shell_quote(path)
         .. " >/dev/null 2>&1 &"
     local ok = os.execute(command)
     if ok then
-        obs.script_log(obs.LOG_INFO, "OBS Interview: queued " .. path)
+        obs.script_log(obs.LOG_INFO, "OBS Interview: opened processing prompt for " .. path)
     else
-        obs.script_log(obs.LOG_ERROR, "OBS Interview: failed to queue " .. path)
+        obs.script_log(obs.LOG_ERROR, "OBS Interview: failed to open processing prompt for " .. path)
     end
 end
 
 local function on_frontend_event(event)
     if event == obs.OBS_FRONTEND_EVENT_RECORDING_STOPPED then
-        enqueue_recording(obs.obs_frontend_get_last_recording())
+        prompt_recording(obs.obs_frontend_get_last_recording())
     end
 end
 
 function script_description()
-    return "После остановки записи передаёт точный файл локальному обработчику: Whisper + H.265 + проверка."
+    return "После остановки записи предлагает сжать и расшифровать файл; исходник и режим аудио выбираются в диалоге."
 end
 
 function script_properties()

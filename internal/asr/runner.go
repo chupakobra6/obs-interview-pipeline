@@ -26,6 +26,8 @@ type Result struct {
 	FFmpeg          time.Duration   `json:"ffmpeg"`
 	ModelColdStart  time.Duration   `json:"model_cold_start"`
 	SpeechGate      time.Duration   `json:"speech_gate"`
+	LongFormPrep    time.Duration   `json:"long_form_preparation"`
+	LeadingOffset   float64         `json:"leading_speech_offset_seconds,omitempty"`
 	Inference       time.Duration   `json:"inference"`
 	Total           time.Duration   `json:"total"`
 	MetalConfirmed  bool            `json:"metal_confirmed"`
@@ -50,6 +52,8 @@ type harvestResponse struct {
 	FFmpeg          time.Duration   `json:"ffmpeg"`
 	ModelColdStart  time.Duration   `json:"model_cold_start"`
 	SpeechGate      time.Duration   `json:"speech_gate"`
+	LongFormPrep    time.Duration   `json:"long_form_preparation"`
+	LeadingOffset   float64         `json:"leading_speech_offset_seconds,omitempty"`
 	Inference       time.Duration   `json:"inference"`
 	Total           time.Duration   `json:"total"`
 }
@@ -87,7 +91,7 @@ func transcribeArgs(inputPath, transcriptPath string) []string {
 	return []string{
 		"--profile", "main",
 		"transcribe-file",
-		"--assume-speech",
+		"--trusted-long-form",
 		"--input", inputPath,
 		"--output", transcriptPath,
 	}
@@ -157,6 +161,8 @@ func decodeHarvestResponse(payload []byte, transcriptPath string) (Result, error
 		FFmpeg:          response.FFmpeg,
 		ModelColdStart:  response.ModelColdStart,
 		SpeechGate:      response.SpeechGate,
+		LongFormPrep:    response.LongFormPrep,
+		LeadingOffset:   response.LeadingOffset,
 		Inference:       response.Inference,
 		Total:           response.Total,
 		MetalConfirmed:  response.MetalConfirmed,

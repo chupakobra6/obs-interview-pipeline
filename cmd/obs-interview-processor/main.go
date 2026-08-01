@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/chupakobra6/obs-interview-pipeline/internal/config"
+	"github.com/chupakobra6/obs-interview-pipeline/internal/policy"
 	"github.com/chupakobra6/obs-interview-pipeline/internal/processor"
 	jobqueue "github.com/chupakobra6/obs-interview-pipeline/internal/queue"
 )
@@ -59,7 +60,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	case "enqueue":
-		cfg, rest, err := loadConfigArgs(home, "enqueue", args[1:])
+		cfg, options, rest, err := loadJobArgs(home, "enqueue", args[1:])
 		if err != nil || len(rest) != 1 {
 			if err == nil {
 				err = fmt.Errorf("enqueue requires one recording path")
@@ -67,15 +68,29 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 2
 		}
-		job, err := jobqueue.Enqueue(cfg, rest[0])
+		job, err := jobqueue.Enqueue(cfg, rest[0], options)
 		if err != nil {
 			fmt.Fprintf(stderr, "enqueue: %v\n", err)
 			return 1
 		}
 		printJSON(stdout, job)
 		return 0
+	case "prompt":
+		cfg, cfgPath, rest, err := loadConfigPathArgs(home, "prompt", args[1:])
+		if err != nil || len(rest) != 1 {
+			if err == nil {
+				err = fmt.Errorf("prompt requires one recording path")
+			}
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
+		if err := launchPrompt(cfg, cfgPath, rest[0]); err != nil {
+			fmt.Fprintf(stderr, "prompt: %v\n", err)
+			return 1
+		}
+		return 0
 	case "process":
-		cfg, rest, err := loadConfigArgs(home, "process", args[1:])
+		cfg, options, rest, err := loadJobArgs(home, "process", args[1:])
 		if err != nil || len(rest) != 1 {
 			if err == nil {
 				err = fmt.Errorf("process requires one recording path")
@@ -83,7 +98,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 2
 		}
-		result, err := processor.New(cfg).Process(ctx, rest[0])
+		result, err := processor.New(cfg).Process(ctx, rest[0], options)
 		if err != nil {
 			fmt.Fprintf(stderr, "process: %v\n", err)
 			return 1
@@ -111,14 +126,48 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 func loadConfigArgs(home, name string, args []string) (config.Config, []string, error) {
+	cfg, _, rest, err := loadConfigPathArgs(home, name, args)
+	return cfg, rest, err
+}
+
+func loadConfigPathArgs(home, name string, args []string) (config.Config, string, []string, error) {
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	path := flags.String("config", config.DefaultPath(home), "config path")
 	if err := flags.Parse(args); err != nil {
-		return config.Config{}, nil, err
+		return config.Config{}, "", nil, err
 	}
 	cfg, err := config.Load(*path)
-	return cfg, flags.Args(), err
+	return cfg, *path, flags.Args(), err
+}
+
+func loadJobArgs(home, name string, args []string) (config.Config, policy.Options, []string, error) {
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	path := flags.String("config", config.DefaultPath(home), "config path")
+	deleteSource := flags.Bool("delete-source", false, "delete source after successful validation")
+	audioMode := flags.String("audio-mode", policy.AudioPreserve, "audio mode: preserve or merge")
+	if err := flags.Parse(args); err != nil {
+		return config.Config{}, policy.Options{}, nil, err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return config.Config{}, policy.Options{}, nil, err
+	}
+	deleteWasSet := false
+	flags.Visit(func(item *flag.Flag) {
+		if item.Name == "delete-source" {
+			deleteWasSet = true
+		}
+	})
+	if !deleteWasSet {
+		*deleteSource = cfg.DeleteSourceOnSuccess
+	}
+	options := policy.Options{DeleteSource: *deleteSource, AudioMode: *audioMode}
+	if err := options.Validate(); err != nil {
+		return config.Config{}, policy.Options{}, nil, err
+	}
+	return cfg, options, flags.Args(), nil
 }
 
 func install(home string, stdout io.Writer) error {
@@ -135,6 +184,9 @@ func install(home string, stdout io.Writer) error {
 		}
 	}
 	if err := installNotifier(cfg); err != nil {
+		return err
+	}
+	if err := installPrompt(cfg); err != nil {
 		return err
 	}
 	if err := config.Write(cfgPath, cfg); err != nil {
@@ -191,6 +243,7 @@ func doctor(ctx context.Context, cfg config.Config, stdout io.Writer) error {
 		{name: "make", path: cfg.MakeCommand},
 		{name: "telegram-harvest", path: cfg.TelegramHarvestCommand},
 		{name: "obs-interview-notifier", path: cfg.NotifierCommand},
+		{name: "obs-interview-prompt", path: cfg.PromptCommand},
 		{name: "swiftc", path: "/usr/bin/swiftc"},
 	}
 	for _, tool := range toolChecks {
@@ -199,13 +252,16 @@ func doctor(ctx context.Context, cfg config.Config, stdout io.Writer) error {
 	}
 	rootInfo, rootErr := os.Stat(cfg.TelegramHarvestRoot)
 	checks = append(checks, check{Name: "telegram-harvest-root", OK: rootErr == nil && rootInfo.IsDir(), Detail: cfg.TelegramHarvestRoot})
-	notifierApp := notifierApplicationPath(cfg.NotifierCommand)
+	notifierApp := applicationPath(cfg.NotifierCommand)
 	signOutput, signErr := exec.CommandContext(ctx, "/usr/bin/codesign", "--verify", "--deep", "--strict", notifierApp).CombinedOutput()
 	checks = append(checks, check{Name: "notifier-signature", OK: signErr == nil, Detail: oneLineDetail(string(signOutput))})
+	promptApp := applicationPath(cfg.PromptCommand)
+	promptSignOutput, promptSignErr := exec.CommandContext(ctx, "/usr/bin/codesign", "--verify", "--deep", "--strict", promptApp).CombinedOutput()
+	checks = append(checks, check{Name: "prompt-signature", OK: promptSignErr == nil, Detail: oneLineDetail(string(promptSignOutput))})
 	buildOutput, buildErr := exec.CommandContext(ctx, cfg.MakeCommand, "-s", "-C", cfg.TelegramHarvestRoot, "build").CombinedOutput()
 	checks = append(checks, check{Name: "telegram-harvest-build", OK: buildErr == nil, Detail: oneLineDetail(string(buildOutput))})
 	if buildErr == nil {
-		asrCheck := exec.CommandContext(ctx, cfg.TelegramHarvestCommand, "--profile", "main", "transcribe-file", "--check", "--assume-speech")
+		asrCheck := exec.CommandContext(ctx, cfg.TelegramHarvestCommand, "--profile", "main", "transcribe-file", "--check", "--trusted-long-form")
 		asrCheck.Dir = cfg.TelegramHarvestRoot
 		asrOutput, asrErr := asrCheck.CombinedOutput()
 		var asrResponse struct {
@@ -217,8 +273,9 @@ func doctor(ctx context.Context, cfg config.Config, stdout io.Writer) error {
 				Decode      struct {
 					BeamSize int `json:"beam_size"`
 				} `json:"decode"`
-				SpeechGate json.RawMessage `json:"speech_gate"`
-				PostFilter string          `json:"post_filter"`
+				SpeechGate      json.RawMessage `json:"speech_gate"`
+				TrustedLongForm json.RawMessage `json:"trusted_long_form"`
+				PostFilter      string          `json:"post_filter"`
 			} `json:"backend"`
 		}
 		decodeErr := json.Unmarshal(asrOutput, &asrResponse)
@@ -229,7 +286,8 @@ func doctor(ctx context.Context, cfg config.Config, stdout io.Writer) error {
 			asrResponse.Backend.Language == "ru" &&
 			asrResponse.Backend.Decode.BeamSize == 5 &&
 			asrResponse.Backend.PostFilter == "terminal-exact-v1" &&
-			len(asrResponse.Backend.SpeechGate) == 0
+			len(asrResponse.Backend.SpeechGate) == 0 &&
+			len(asrResponse.Backend.TrustedLongForm) > 0
 		checks = append(checks, check{Name: "telegram-harvest-asr", OK: asrOK, Detail: oneLineDetail(string(asrOutput))})
 	}
 	encoderOutput, encoderErr := exec.CommandContext(ctx, cfg.FFmpegCommand, "-hide_banner", "-encoders").CombinedOutput()
@@ -266,7 +324,7 @@ func runQueue(ctx context.Context, cfg config.Config, stdout, stderr io.Writer) 
 				continue
 			}
 			fmt.Fprintf(stdout, "%s processing %s\n", time.Now().Format(time.RFC3339), job.Path)
-			result, processErr := pipeline.Process(ctx, job.Path)
+			result, processErr := pipeline.Process(ctx, job.Path, job.Options)
 			if finishErr := jobqueue.Finish(cfg, path, job, processErr); finishErr != nil {
 				return errors.Join(processErr, finishErr)
 			}
@@ -290,7 +348,7 @@ func notify(cfg config.Config, title, message, targetDir string) error {
 	if !cfg.Notifications {
 		return nil
 	}
-	appPath := notifierApplicationPath(cfg.NotifierCommand)
+	appPath := applicationPath(cfg.NotifierCommand)
 	args := append([]string{"-n", appPath, "--args"}, notificationArgs(title, message, targetDir)...)
 	if output, err := exec.Command("/usr/bin/open", args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("launch notifier app: %w: %s", err, oneLineDetail(string(output)))
@@ -302,82 +360,145 @@ func notificationArgs(title, message, targetDir string) []string {
 	return []string{"--title", title, "--message", message, "--open-dir", targetDir}
 }
 
-func notifierApplicationPath(command string) string {
+func applicationPath(command string) string {
 	return filepath.Dir(filepath.Dir(filepath.Dir(command)))
 }
 
+func launchPrompt(cfg config.Config, cfgPath, recording string) error {
+	absRecording, err := filepath.Abs(recording)
+	if err != nil {
+		return fmt.Errorf("resolve recording path: %w", err)
+	}
+	info, err := os.Stat(absRecording)
+	if err != nil {
+		return fmt.Errorf("stat recording: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 {
+		return fmt.Errorf("recording must be a non-empty regular file")
+	}
+	installedProcessor := filepath.Join(cfg.StateDir, "bin", executableName)
+	args := append([]string{"-n", applicationPath(cfg.PromptCommand), "--args"}, promptArgs(installedProcessor, cfgPath, absRecording, cfg.DeleteSourceOnSuccess)...)
+	if output, err := exec.Command("/usr/bin/open", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("launch prompt app: %w: %s", err, oneLineDetail(string(output)))
+	}
+	return nil
+}
+
+func promptArgs(processorPath, cfgPath, recordingPath string, deleteSourceDefault bool) []string {
+	return []string{
+		"--processor", processorPath,
+		"--config", cfgPath,
+		"--recording", recordingPath,
+		"--delete-source-default", strconv.FormatBool(deleteSourceDefault),
+	}
+}
+
 func installNotifier(cfg config.Config) error {
-	macOSDir := filepath.Dir(cfg.NotifierCommand)
+	return installSwiftApp(swiftAppSpec{
+		Command:      cfg.NotifierCommand,
+		Executable:   "obs-interview-notifier",
+		BundleID:     "com.igor.obs-interview-notifier",
+		DisplayName:  "OBS Interview Notifier",
+		SourceName:   "obs_interview_notifier.swift",
+		Source:       notifierSwiftSource,
+		Frameworks:   []string{"AppKit", "UserNotifications"},
+		ErrorContext: "notifier",
+	})
+}
+
+func installPrompt(cfg config.Config) error {
+	return installSwiftApp(swiftAppSpec{
+		Command:      cfg.PromptCommand,
+		Executable:   "obs-interview-prompt",
+		BundleID:     "com.igor.obs-interview-prompt",
+		DisplayName:  "OBS Interview Prompt",
+		SourceName:   "obs_interview_prompt.swift",
+		Source:       promptSwiftSource,
+		Frameworks:   []string{"AppKit"},
+		ErrorContext: "prompt",
+	})
+}
+
+type swiftAppSpec struct {
+	Command      string
+	Executable   string
+	BundleID     string
+	DisplayName  string
+	SourceName   string
+	Source       string
+	Frameworks   []string
+	ErrorContext string
+}
+
+func installSwiftApp(spec swiftAppSpec) error {
+	macOSDir := filepath.Dir(spec.Command)
 	contentsDir := filepath.Dir(macOSDir)
 	appDir := filepath.Dir(contentsDir)
 	resourcesDir := filepath.Join(contentsDir, "Resources")
 	for _, dir := range []string{macOSDir, resourcesDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return fmt.Errorf("create notifier app directory: %w", err)
+			return fmt.Errorf("create %s app directory: %w", spec.ErrorContext, err)
 		}
 	}
-	sourcePath := filepath.Join(resourcesDir, "obs_interview_notifier.swift")
-	if err := writeAtomic(sourcePath, []byte(notifierSwiftSource), 0o600); err != nil {
-		return fmt.Errorf("install notifier source: %w", err)
+	sourcePath := filepath.Join(resourcesDir, spec.SourceName)
+	if err := writeAtomic(sourcePath, []byte(spec.Source), 0o600); err != nil {
+		return fmt.Errorf("install %s source: %w", spec.ErrorContext, err)
 	}
-	infoPlist := `<?xml version="1.0" encoding="UTF-8"?>
+	infoPlist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleExecutable</key><string>obs-interview-notifier</string>
-  <key>CFBundleIdentifier</key><string>com.igor.obs-interview-notifier</string>
-  <key>CFBundleName</key><string>OBS Interview Notifier</string>
-  <key>CFBundleDisplayName</key><string>OBS Interview Notifier</string>
+  <key>CFBundleExecutable</key><string>%s</string>
+  <key>CFBundleIdentifier</key><string>%s</string>
+  <key>CFBundleName</key><string>%s</string>
+  <key>CFBundleDisplayName</key><string>%s</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSUIElement</key><true/>
 </dict>
 </plist>
-`
+`, xmlEscape(spec.Executable), xmlEscape(spec.BundleID), xmlEscape(spec.DisplayName), xmlEscape(spec.DisplayName))
 	if err := writeAtomic(filepath.Join(contentsDir, "Info.plist"), []byte(infoPlist), 0o600); err != nil {
-		return fmt.Errorf("install notifier Info.plist: %w", err)
+		return fmt.Errorf("install %s Info.plist: %w", spec.ErrorContext, err)
 	}
-	temporary, err := os.CreateTemp(macOSDir, ".notifier-*")
+	temporary, err := os.CreateTemp(macOSDir, "."+spec.Executable+"-*")
 	if err != nil {
-		return fmt.Errorf("create temporary notifier binary: %w", err)
+		return fmt.Errorf("create temporary %s binary: %w", spec.ErrorContext, err)
 	}
 	temporaryPath := temporary.Name()
 	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close temporary notifier binary: %w", err)
+		return fmt.Errorf("close temporary %s binary: %w", spec.ErrorContext, err)
 	}
 	if err := os.Remove(temporaryPath); err != nil {
-		return fmt.Errorf("prepare temporary notifier binary: %w", err)
+		return fmt.Errorf("prepare temporary %s binary: %w", spec.ErrorContext, err)
 	}
 	defer os.Remove(temporaryPath)
-	output, err := exec.Command(
-		"/usr/bin/swiftc",
-		"-swift-version", "5",
-		"-O",
-		"-framework", "AppKit",
-		"-framework", "UserNotifications",
-		sourcePath,
-		"-o", temporaryPath,
-	).CombinedOutput()
+	compilerArgs := []string{"-swift-version", "5", "-O"}
+	for _, framework := range spec.Frameworks {
+		compilerArgs = append(compilerArgs, "-framework", framework)
+	}
+	compilerArgs = append(compilerArgs, sourcePath, "-o", temporaryPath)
+	output, err := exec.Command("/usr/bin/swiftc", compilerArgs...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("compile notifier app: %w: %s", err, oneLineDetail(string(output)))
+		return fmt.Errorf("compile %s app: %w: %s", spec.ErrorContext, err, oneLineDetail(string(output)))
 	}
 	if err := os.Chmod(temporaryPath, 0o755); err != nil {
-		return fmt.Errorf("chmod notifier app: %w", err)
+		return fmt.Errorf("chmod %s app: %w", spec.ErrorContext, err)
 	}
-	if err := os.Rename(temporaryPath, cfg.NotifierCommand); err != nil {
-		return fmt.Errorf("publish notifier app: %w", err)
+	if err := os.Rename(temporaryPath, spec.Command); err != nil {
+		return fmt.Errorf("publish %s app: %w", spec.ErrorContext, err)
 	}
 	signOutput, signErr := exec.Command(
 		"/usr/bin/codesign",
 		"--force",
 		"--deep",
 		"--sign", "-",
-		"--identifier", "com.igor.obs-interview-notifier",
+		"--identifier", spec.BundleID,
 		appDir,
 	).CombinedOutput()
 	if signErr != nil {
-		return fmt.Errorf("sign notifier app: %w: %s", signErr, oneLineDetail(string(signOutput)))
+		return fmt.Errorf("sign %s app: %w: %s", spec.ErrorContext, signErr, oneLineDetail(string(signOutput)))
 	}
 	return nil
 }
@@ -476,7 +597,7 @@ func writeAtomic(path string, payload []byte, mode os.FileMode) error {
 }
 
 func usage(out io.Writer) {
-	fmt.Fprintln(out, "usage: obs-interview-processor <install|doctor|enqueue|run-queue|process> [--config path] [recording]")
+	fmt.Fprintln(out, "usage: obs-interview-processor <install|doctor|prompt|enqueue|run-queue|process> [--config path] [--delete-source bool] [--audio-mode preserve|merge] [recording]")
 }
 
 func printJSON(out io.Writer, value any) {

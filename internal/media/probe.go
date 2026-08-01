@@ -61,13 +61,17 @@ func (p Probe) Video() (Stream, bool) {
 }
 
 func (p Probe) AudioCount() int {
-	count := 0
+	return len(p.Audios())
+}
+
+func (p Probe) Audios() []Stream {
+	audios := make([]Stream, 0)
 	for _, stream := range p.Streams {
 		if stream.CodecType == "audio" {
-			count++
+			audios = append(audios, stream)
 		}
 	}
-	return count
+	return audios
 }
 
 func (p Probe) Audio() (Stream, bool) {
@@ -107,7 +111,7 @@ func MatchesFrameRate(video Stream, fps int) bool {
 	return math.Abs(FrameRate(video.AvgFrameRate)-float64(fps)) <= 0.02
 }
 
-func ValidateCompressed(source, output Probe, width, height, fps, audioBitrateKbps int) error {
+func ValidateCompressed(source, output Probe, width, height, fps, audioBitrateKbps, expectedAudioTracks int) error {
 	video, ok := output.Video()
 	if !ok {
 		return fmt.Errorf("compressed output has no video stream")
@@ -122,23 +126,27 @@ func ValidateCompressed(source, output Probe, width, height, fps, audioBitrateKb
 		return fmt.Errorf("compressed frame rate is %.3f, want %d", actual, fps)
 	}
 	if source.AudioCount() == 0 {
-		return fmt.Errorf("source has no master audio stream")
+		return fmt.Errorf("source has no audio stream")
 	}
-	if output.AudioCount() != 1 {
-		return fmt.Errorf("compressed audio stream count is %d, want 1 master stream", output.AudioCount())
+	if expectedAudioTracks <= 0 {
+		return fmt.Errorf("expected audio stream count must be positive")
 	}
-	audio, _ := output.Audio()
-	if audio.CodecName != "aac" {
-		return fmt.Errorf("compressed audio codec is %q, want aac", audio.CodecName)
-	}
-	bitRate, err := strconv.Atoi(audio.BitRate)
-	if err != nil || bitRate <= 0 {
-		return fmt.Errorf("compressed audio bitrate is unavailable")
+	if output.AudioCount() != expectedAudioTracks {
+		return fmt.Errorf("compressed audio stream count is %d, want %d", output.AudioCount(), expectedAudioTracks)
 	}
 	target := audioBitrateKbps * 1000
 	maximum := target + target/4
-	if bitRate > maximum {
-		return fmt.Errorf("compressed audio bitrate is %d, want no more than approximately %d", bitRate, target)
+	for index, audio := range output.Audios() {
+		if audio.CodecName != "aac" {
+			return fmt.Errorf("compressed audio stream %d codec is %q, want aac", index, audio.CodecName)
+		}
+		bitRate, err := strconv.Atoi(audio.BitRate)
+		if err != nil || bitRate <= 0 {
+			return fmt.Errorf("compressed audio stream %d bitrate is unavailable", index)
+		}
+		if bitRate > maximum {
+			return fmt.Errorf("compressed audio stream %d bitrate is %d, want no more than approximately %d", index, bitRate, target)
+		}
 	}
 	sourceDuration := source.DurationSeconds()
 	outputDuration := output.DurationSeconds()

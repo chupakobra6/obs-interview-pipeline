@@ -13,17 +13,22 @@ import (
 	"time"
 
 	"github.com/chupakobra6/obs-interview-pipeline/internal/config"
+	"github.com/chupakobra6/obs-interview-pipeline/internal/policy"
 )
 
 type Job struct {
-	ID         string    `json:"id"`
-	Path       string    `json:"path"`
-	EnqueuedAt time.Time `json:"enqueued_at"`
-	FinishedAt time.Time `json:"finished_at,omitempty"`
-	Error      string    `json:"error,omitempty"`
+	ID         string         `json:"id"`
+	Path       string         `json:"path"`
+	Options    policy.Options `json:"options"`
+	EnqueuedAt time.Time      `json:"enqueued_at"`
+	FinishedAt time.Time      `json:"finished_at,omitempty"`
+	Error      string         `json:"error,omitempty"`
 }
 
-func Enqueue(cfg config.Config, inputPath string) (Job, error) {
+func Enqueue(cfg config.Config, inputPath string, options policy.Options) (Job, error) {
+	if err := options.Validate(); err != nil {
+		return Job{}, err
+	}
 	absPath, err := filepath.Abs(inputPath)
 	if err != nil {
 		return Job{}, fmt.Errorf("resolve recording path: %w", err)
@@ -37,7 +42,7 @@ func Enqueue(cfg config.Config, inputPath string) (Job, error) {
 	}
 	hash := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%d", absPath, info.ModTime().UnixNano(), info.Size())))
 	id := fmt.Sprintf("%020d-%s", time.Now().UnixNano(), hex.EncodeToString(hash[:6]))
-	job := Job{ID: id, Path: absPath, EnqueuedAt: time.Now()}
+	job := Job{ID: id, Path: absPath, Options: options, EnqueuedAt: time.Now()}
 	if err := os.MkdirAll(cfg.QueueDir(), 0o700); err != nil {
 		return Job{}, fmt.Errorf("create queue directory: %w", err)
 	}
@@ -77,6 +82,9 @@ func Read(path string) (Job, error) {
 	}
 	if strings.TrimSpace(job.ID) == "" || strings.TrimSpace(job.Path) == "" {
 		return Job{}, fmt.Errorf("job is missing id or path")
+	}
+	if err := job.Options.Validate(); err != nil {
+		return Job{}, fmt.Errorf("job options: %w", err)
 	}
 	return job, nil
 }

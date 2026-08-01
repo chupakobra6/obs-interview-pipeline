@@ -19,12 +19,12 @@ func TestValidateCompressed(t *testing.T) {
 		},
 		Format: Format{Duration: "59.98", Size: "600000"},
 	}
-	if err := ValidateCompressed(source, output, 1512, 982, 30, 96); err != nil {
+	if err := ValidateCompressed(source, output, 1512, 982, 30, 96, 1); err != nil {
 		t.Fatalf("ValidateCompressed() error = %v", err)
 	}
 
 	output.Streams = append(output.Streams, Stream{CodecType: "audio", CodecName: "aac", BitRate: "96000"})
-	if err := ValidateCompressed(source, output, 1512, 982, 30, 96); err == nil {
+	if err := ValidateCompressed(source, output, 1512, 982, 30, 96, 1); err == nil {
 		t.Fatal("ValidateCompressed() accepted an extra audio stream")
 	}
 }
@@ -41,7 +41,7 @@ func TestValidateCompressedAcceptsLowerAverageAACBitrateForSilence(t *testing.T)
 		},
 		Format: Format{Duration: "20", Size: "2000000"},
 	}
-	if err := ValidateCompressed(source, output, 1512, 982, 30, 96); err != nil {
+	if err := ValidateCompressed(source, output, 1512, 982, 30, 96, 1); err != nil {
 		t.Fatalf("ValidateCompressed() error = %v", err)
 	}
 }

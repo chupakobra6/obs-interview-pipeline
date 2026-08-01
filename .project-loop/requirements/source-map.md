@@ -22,6 +22,7 @@
 | S005 | user delta | 2026-08-01 | `.project-loop/intake/user-deltas.md` | принято | Последнее реальное видео в Movies явно разрешено провести через pipeline с обычным delete gate. |
 | S006 | user delta | 2026-08-01 | `.project-loop/intake/user-deltas.md` | принято | Провести tooling-review, repo-polish и удалить созданные проверками артефакты без затрагивания реального результата. |
 | S007 | user delta | 2026-08-01 | `.project-loop/intake/user-deltas.md` | принято | OBS fast path: Harvest ASR без whole-file Silero gate, прямой HEVC VideoToolbox, отсутствие лишних scale/fps/video encode, первая master AAC 96 Кбит/с. |
+| S008 | user delta | 2026-08-01 | `.project-loop/intake/user-deltas.md` | принято | Исправить потерю начала transcript; после OBS Stop спрашивать режим обработки, delete policy и merge tracks; по умолчанию сохранять все tracks с AAC 96. |
 
 ## Конфликты
 | Источники | Решение | Дата |
@@ -29,3 +30,4 @@
 | Физическое 3024x1964 и ожидаемое «в два раза меньше» | Холст сохраняет физический размер, итоговый output устанавливается в логические 1512x982. | 2026-08-01 |
 | CON-002 из S002 и новая инструкция S003 | S003 имеет больший приоритет: разрешено изменить Telegram Harvest, сохранив read-only границу Telegram. | 2026-08-01 |
 | REQ-002/REQ-003 и новая инструкция S007 | S007 заменяет OBS-специфичные gate/audio/video требования; основной Telegram Harvest workflow не меняется. | 2026-08-01 |
+| REQ-013 и новая инструкция S008 | S008 заменяет master-only default: новый default сохраняет все дорожки; сведение в одну становится per-job opt-in. | 2026-08-01 |

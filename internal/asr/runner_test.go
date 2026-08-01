@@ -53,7 +53,7 @@ func TestToolEnvironmentProvidesHomebrewToLaunchAgentChild(t *testing.T) {
 func TestTranscribeArgsSelectTrustedOBSProfile(t *testing.T) {
 	args := transcribeArgs("/tmp/interview.mp4", "/tmp/transcript.txt")
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"--profile main", "transcribe-file", "--assume-speech", "--input /tmp/interview.mp4", "--output /tmp/transcript.txt"} {
+	for _, want := range []string{"--profile main", "transcribe-file", "--trusted-long-form", "--input /tmp/interview.mp4", "--output /tmp/transcript.txt"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("transcribe args %q missing %q", joined, want)
 		}
