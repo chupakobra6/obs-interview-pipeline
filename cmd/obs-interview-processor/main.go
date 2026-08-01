@@ -205,10 +205,31 @@ func doctor(ctx context.Context, cfg config.Config, stdout io.Writer) error {
 	buildOutput, buildErr := exec.CommandContext(ctx, cfg.MakeCommand, "-s", "-C", cfg.TelegramHarvestRoot, "build").CombinedOutput()
 	checks = append(checks, check{Name: "telegram-harvest-build", OK: buildErr == nil, Detail: oneLineDetail(string(buildOutput))})
 	if buildErr == nil {
-		asrCheck := exec.CommandContext(ctx, cfg.TelegramHarvestCommand, "--profile", "main", "transcribe-file", "--check")
+		asrCheck := exec.CommandContext(ctx, cfg.TelegramHarvestCommand, "--profile", "main", "transcribe-file", "--check", "--assume-speech")
 		asrCheck.Dir = cfg.TelegramHarvestRoot
 		asrOutput, asrErr := asrCheck.CombinedOutput()
-		asrOK := asrErr == nil && strings.Contains(string(asrOutput), `"contract_version": 1`) && strings.Contains(string(asrOutput), `"accelerator": "metal"`)
+		var asrResponse struct {
+			ContractVersion int `json:"contract_version"`
+			Backend         struct {
+				Accelerator string `json:"accelerator"`
+				Model       string `json:"model"`
+				Language    string `json:"language"`
+				Decode      struct {
+					BeamSize int `json:"beam_size"`
+				} `json:"decode"`
+				SpeechGate json.RawMessage `json:"speech_gate"`
+				PostFilter string          `json:"post_filter"`
+			} `json:"backend"`
+		}
+		decodeErr := json.Unmarshal(asrOutput, &asrResponse)
+		asrOK := asrErr == nil && decodeErr == nil &&
+			asrResponse.ContractVersion == 1 &&
+			asrResponse.Backend.Accelerator == "metal" &&
+			asrResponse.Backend.Model == "ggml-large-v3-turbo-q5_0.bin" &&
+			asrResponse.Backend.Language == "ru" &&
+			asrResponse.Backend.Decode.BeamSize == 5 &&
+			asrResponse.Backend.PostFilter == "terminal-exact-v1" &&
+			len(asrResponse.Backend.SpeechGate) == 0
 		checks = append(checks, check{Name: "telegram-harvest-asr", OK: asrOK, Detail: oneLineDetail(string(asrOutput))})
 	}
 	encoderOutput, encoderErr := exec.CommandContext(ctx, cfg.FFmpegCommand, "-hide_banner", "-encoders").CombinedOutput()

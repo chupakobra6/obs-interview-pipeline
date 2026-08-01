@@ -37,6 +37,9 @@ func TestLoadForInstallMigratesLegacyWhisperConfig(t *testing.T) {
 	if cfg.Version != CurrentVersion || cfg.VideoQuality != 55 {
 		t.Fatalf("migration lost settings: %+v", cfg)
 	}
+	if cfg.AudioBitrateKbps != 96 {
+		t.Fatalf("migration did not apply master audio bitrate: %+v", cfg)
+	}
 	if cfg.TelegramHarvestRoot != filepath.Join(dir, "projects", "telegram-harvest") {
 		t.Fatalf("unexpected Harvest root: %s", cfg.TelegramHarvestRoot)
 	}

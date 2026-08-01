@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	CurrentVersion   = 3
+	CurrentVersion   = 4
 	AppDirName       = "obs-interview-pipeline"
 	ConfigFileName   = "config.json"
 	LaunchAgentLabel = "com.igor.obs-interview-processor"
@@ -31,6 +31,7 @@ type Config struct {
 	OutputHeight           int    `json:"output_height"`
 	OutputFPS              int    `json:"output_fps"`
 	VideoQuality           int    `json:"video_quality"`
+	AudioBitrateKbps       int    `json:"audio_bitrate_kbps"`
 	DeleteSourceOnSuccess  bool   `json:"delete_source_on_success"`
 	Notifications          bool   `json:"notifications"`
 }
@@ -52,7 +53,8 @@ func Default(home string) Config {
 		OutputWidth:            1512,
 		OutputHeight:           982,
 		OutputFPS:              30,
-		VideoQuality:           60,
+		VideoQuality:           55,
+		AudioBitrateKbps:       96,
 		DeleteSourceOnSuccess:  true,
 		Notifications:          true,
 	}
@@ -179,6 +181,9 @@ func (c Config) Validate() error {
 	}
 	if c.VideoQuality < 1 || c.VideoQuality > 100 {
 		return fmt.Errorf("video_quality must be between 1 and 100")
+	}
+	if c.AudioBitrateKbps < 32 || c.AudioBitrateKbps > 320 {
+		return fmt.Errorf("audio_bitrate_kbps must be between 32 and 320")
 	}
 	return nil
 }

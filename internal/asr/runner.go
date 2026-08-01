@@ -65,10 +65,7 @@ func (r Runner) Transcribe(ctx context.Context, inputPath, workDir string) (Resu
 	command := exec.CommandContext(
 		ctx,
 		r.Config.TelegramHarvestCommand,
-		"--profile", "main",
-		"transcribe-file",
-		"--input", inputPath,
-		"--output", transcriptPath,
+		transcribeArgs(inputPath, transcriptPath)...,
 	)
 	command.Dir = r.Config.TelegramHarvestRoot
 	command.Env = r.toolEnvironment()
@@ -84,6 +81,16 @@ func (r Runner) Transcribe(ctx context.Context, inputPath, workDir string) (Resu
 		return Result{}, fmt.Errorf("telegram-harvest ASR: %w: %s", err, compact(stderr.Bytes()))
 	}
 	return decodeHarvestResponse(stdout.Bytes(), transcriptPath)
+}
+
+func transcribeArgs(inputPath, transcriptPath string) []string {
+	return []string{
+		"--profile", "main",
+		"transcribe-file",
+		"--assume-speech",
+		"--input", inputPath,
+		"--output", transcriptPath,
+	}
 }
 
 func (r Runner) buildHarvest(ctx context.Context) error {
@@ -130,6 +137,9 @@ func decodeHarvestResponse(payload []byte, transcriptPath string) (Result, error
 	}
 	if response.SpeechDetected && !response.MetalConfirmed {
 		return Result{}, fmt.Errorf("telegram-harvest ASR did not confirm Metal for detected speech")
+	}
+	if response.SpeechDetected && strings.TrimSpace(response.Text) == "" {
+		return Result{}, fmt.Errorf("telegram-harvest ASR returned no transcript for assumed speech")
 	}
 	transcript, err := os.ReadFile(transcriptPath)
 	if err != nil {

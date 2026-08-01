@@ -7,7 +7,7 @@
 - Автоматически обрабатывать завершённые OBS-записи: локальный ASR, H.265, медиапроверка, атомарная публикация и удаление source только после success.
 
 ## Текущий Шаг
-- active step: `STEP-003R`
+- active step: `STEP-004R`
 - status: `готово`
 
 ## Завершено
@@ -16,12 +16,16 @@
 - Установлены бинарник/config, `LaunchAgent` и Lua-hook; hook сохранён в текущей OBS scene collection.
 - Установлен подписанный `OBS Interview Notifier.app`: временная карточка остаётся в Центре уведомлений, helper живёт до клика и открывает точный каталог результата.
 - OBS настроен: physical canvas 3024x1964, output 1512x982, 30 fps.
+- OBS пишет HEVC аппаратным Apple VideoToolbox с CRF quality 55 и тремя source AAC tracks; готовый video stream не перекодируется повторно.
+- OBS-адаптер вызывает Harvest с `--assume-speech`: whole-file Silero gate пропускается только для доверенной записи, а q5_0/Metal/ru/beam 5/post-filter остаются единым профилем Harvest.
+- Финал хранит первую master track с AAC target 96 Кбит/с; output validator требует один AAC stream и защищает от пустого transcript.
 - Current-head OBS E2E прошёл: 16,765,693 → 8,745,466 байт, 3 AAC сохранены, фраза распознана полностью общим Harvest ASR, source удалён после validation.
 - Alert style readback — «Временно»; UI-клик открыл Finder в E2E-каталоге с video/transcript/manifest.
 - Уведомления при видеоповторе/общем доступе к экрану возвращены в режим «уведомления выкл.».
 - Реальное собеседование `2026-07-31 13-28-17` прошло pipeline: 363,398,845 → 253,265,579 B, 3 AAC, 971.97 s, Harvest ASR/Metal; source удалён после success.
 - Tooling-review/repo-polish добавил Swift type-check в `make check`, перевёл CI на macOS, сделал doctor deterministic и закрыл lifecycle helper после очистки карточки.
 - Disposable output, test job/error history, `.DS_Store` и repo build artifacts перемещены в Корзину/очищены; runtime оставляет только реальный result/job/notifier.
+- Current-head fast-path OBS E2E: 29.23 s, HEVC 1512x982@30 + 3 AAC, 3,439,630 B → video copy + 1 AAC, 1,863,425 B; ASR 3.43 s, gate 0; весь job около 4 s, source удалён после validation.
 
 ## Измененные Файлы
 - Весь новый репозиторий `/Users/igor/projects/obs-interview-pipeline`.
@@ -38,6 +42,7 @@
 - E2E manifest подтверждает HEVC 1512x982@30, длительность 21.07 s, 3 AAC streams и ASR contract v1.
 - Computer Use readback подтверждает стиль «Временно» и точный каталог Finder после клика.
 - Real-job manifest/ffprobe и done JSON подтверждают текущий installed pipeline без error.
+- Fast-path manifest подтверждает `video_mode=copy`, `speech_gate=0`, q5_0/Metal/ru/beam 5/post-filter и одну master AAC; OBS UI readback подтверждает Apple VT HEVC/CRF 55/3 tracks.
 - Repo/runtime/process inventory после cleanup не показывает `.processing-*`, temp E2E dirs или test notifier processes.
 
 ## Агенты
@@ -47,13 +52,14 @@
 - Не применимо: delegation prompts отсутствовали.
 
 ## Пользовательские Дельты
-- S003–S006 сохранены в `.project-loop/intake/user-deltas.md`: общий Harvest ASR, notification, реальный E2E и финальный cleanup/review.
+- S003–S007 сохранены в `.project-loop/intake/user-deltas.md`: общий Harvest ASR, notification, real E2E, cleanup/review и HEVC/no-gate fast path.
 
 ## Риски И Блокеры
 - Финальный HEVC использует `hvc1`: штатно воспроизводится на macOS, но может требовать HEVC support на других платформах.
 - OBS зависит от соседнего пути Telegram Harvest; `make doctor` обнаружит его перемещение, проблемы сборки или ASR runtime до следующей записи.
 - Невидимый notifier-процесс ждёт, пока карточка доступна; клик или очистка карточки завершают его.
 - Source удаляется permanent unlink по прямому требованию Игоря; при любом failure до delete gate он остаётся.
+- Три раздельные source tracks существуют только до delete gate; для будущего монтажа потребуется отдельная политика сохранения source или sidecar-архива.
 
 ## Следующее Действие
 - Использовать OBS как обычно: после «Остановить запись» дождаться macOS notification; результат появится в `~/Movies/Interviews/<timestamp>/`.

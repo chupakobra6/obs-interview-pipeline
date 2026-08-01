@@ -50,6 +50,16 @@ func TestToolEnvironmentProvidesHomebrewToLaunchAgentChild(t *testing.T) {
 	}
 }
 
+func TestTranscribeArgsSelectTrustedOBSProfile(t *testing.T) {
+	args := transcribeArgs("/tmp/interview.mp4", "/tmp/transcript.txt")
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--profile main", "transcribe-file", "--assume-speech", "--input /tmp/interview.mp4", "--output /tmp/transcript.txt"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("transcribe args %q missing %q", joined, want)
+		}
+	}
+}
+
 func TestDecodeHarvestResponseRejectsUnconfirmedMetalAndMismatch(t *testing.T) {
 	dir := t.TempDir()
 	transcriptPath := filepath.Join(dir, "transcript.txt")
@@ -73,5 +83,27 @@ func TestDecodeHarvestResponseRejectsUnconfirmedMetalAndMismatch(t *testing.T) {
 	payload, _ = json.Marshal(base)
 	if _, err := decodeHarvestResponse(payload, transcriptPath); err == nil || !strings.Contains(err.Error(), "differs") {
 		t.Fatalf("unexpected mismatch error: %v", err)
+	}
+}
+
+func TestDecodeHarvestResponseRejectsEmptyAssumedSpeech(t *testing.T) {
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "transcript.txt")
+	if err := os.WriteFile(transcriptPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(harvestResponse{
+		ContractVersion: harvestContractVersion,
+		Status:          "ok",
+		SpeechDetected:  true,
+		MetalConfirmed:  true,
+		Engine:          "whispercpp",
+		Backend:         json.RawMessage(`{"backend":"whispercpp","accelerator":"metal"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeHarvestResponse(payload, transcriptPath); err == nil || !strings.Contains(err.Error(), "no transcript") {
+		t.Fatalf("unexpected empty transcript error: %v", err)
 	}
 }

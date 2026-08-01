@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/chupakobra6/obs-interview-pipeline/internal/asr"
@@ -18,10 +19,10 @@ func (f transcriberFunc) Transcribe(ctx context.Context, input, work string) (as
 	return f(ctx, input, work)
 }
 
-type compressorFunc func(context.Context, string, string) error
+type compressorFunc func(context.Context, string, string, media.Probe) (Compression, error)
 
-func (f compressorFunc) Compress(ctx context.Context, input, output string) error {
-	return f(ctx, input, output)
+func (f compressorFunc) Compress(ctx context.Context, input, output string, source media.Probe) (Compression, error) {
+	return f(ctx, input, output, source)
 }
 
 func TestPipelineDeletesOnlyAfterValidatedPublish(t *testing.T) {
@@ -39,8 +40,8 @@ func TestPipelineDeletesOnlyAfterValidatedPublish(t *testing.T) {
 		Transcriber: transcriberFunc(func(context.Context, string, string) (asr.Result, error) {
 			return asr.Result{Text: "Тестовая расшифровка.", SpeechDetected: true, MetalConfirmed: true}, nil
 		}),
-		Compressor: compressorFunc(func(_ context.Context, _, output string) error {
-			return os.WriteFile(output, make([]byte, 500), 0o600)
+		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe) (Compression, error) {
+			return Compression{VideoMode: "copy", AudioTrack: 1, AudioBitrateKbps: 96}, os.WriteFile(output, make([]byte, 500), 0o600)
 		}),
 		Probe: fakeProbe(source),
 		Remove: func(string) error {
@@ -88,9 +89,9 @@ func TestPipelineFailureKeepsSourceAndPublishesNothing(t *testing.T) {
 		Transcriber: transcriberFunc(func(context.Context, string, string) (asr.Result, error) {
 			return asr.Result{}, errors.New("ASR failed")
 		}),
-		Compressor: compressorFunc(func(ctx context.Context, _, _ string) error {
+		Compressor: compressorFunc(func(ctx context.Context, _, _ string, _ media.Probe) (Compression, error) {
 			<-ctx.Done()
-			return ctx.Err()
+			return Compression{}, ctx.Err()
 		}),
 		Probe:  fakeProbe(source),
 		Remove: os.Remove,
@@ -121,7 +122,8 @@ func testConfig(dir string) config.Config {
 		OutputWidth:            1512,
 		OutputHeight:           982,
 		OutputFPS:              30,
-		VideoQuality:           60,
+		VideoQuality:           55,
+		AudioBitrateKbps:       96,
 		DeleteSourceOnSuccess:  true,
 	}
 }
@@ -130,13 +132,58 @@ func fakeProbe(_ string) ProbeFunc {
 	return func(_ context.Context, _, path string) (media.Probe, error) {
 		if filepath.Base(path) != "recording.mp4" {
 			return media.Probe{
-				Streams: []media.Stream{{CodecType: "video", CodecName: "h264"}, {CodecType: "audio", CodecName: "aac"}},
+				Streams: []media.Stream{{CodecType: "video", CodecName: "h264"}, {CodecType: "audio", CodecName: "aac", BitRate: "160000"}},
 				Format:  media.Format{Duration: "10", Size: "1000"},
 			}, nil
 		}
 		return media.Probe{
-			Streams: []media.Stream{{CodecType: "video", CodecName: "hevc", Width: 1512, Height: 982, AvgFrameRate: "30/1"}, {CodecType: "audio", CodecName: "aac"}},
+			Streams: []media.Stream{{CodecType: "video", CodecName: "hevc", Width: 1512, Height: 982, AvgFrameRate: "30/1"}, {CodecType: "audio", CodecName: "aac", BitRate: "96000"}},
 			Format:  media.Format{Duration: "10", Size: "500"},
 		}, nil
+	}
+}
+
+func TestFFmpegCommandCopiesReadyHEVCAndKeepsOnlyMasterAudio(t *testing.T) {
+	cfg := testConfig(t.TempDir())
+	source := media.Probe{Streams: []media.Stream{
+		{CodecType: "video", CodecName: "hevc", Width: 1512, Height: 982, AvgFrameRate: "30/1"},
+		{CodecType: "audio", CodecName: "aac"},
+		{CodecType: "audio", CodecName: "aac"},
+		{CodecType: "audio", CodecName: "aac"},
+	}}
+	compression, args, err := (FFmpegCompressor{Config: cfg}).command("input.mp4", "output.mp4", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compression.VideoMode != "copy" || len(compression.VideoFilters) != 0 || compression.AudioTrack != 1 || compression.AudioBitrateKbps != 96 {
+		t.Fatalf("unexpected compression: %+v", compression)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"-map 0:a:0", "-c:v copy", "-c:a aac", "-b:a 96k", "-movflags +faststart"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("ffmpeg args %q missing %q", joined, want)
+		}
+	}
+	if strings.Contains(joined, " -vf ") || strings.Contains(joined, "hevc_videotoolbox") {
+		t.Fatalf("ready HEVC unexpectedly filtered or transcoded: %q", joined)
+	}
+}
+
+func TestFFmpegCommandAddsOnlyNecessaryFallbackFilters(t *testing.T) {
+	cfg := testConfig(t.TempDir())
+	source := media.Probe{Streams: []media.Stream{
+		{CodecType: "video", CodecName: "h264", Width: 3024, Height: 1964, AvgFrameRate: "30/1"},
+		{CodecType: "audio", CodecName: "aac"},
+	}}
+	compression, args, err := (FFmpegCompressor{Config: cfg}).command("input.mp4", "output.mp4", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compression.VideoMode != "transcode" || len(compression.VideoFilters) != 1 || compression.VideoFilters[0] != "scale=1512:982:flags=lanczos" {
+		t.Fatalf("unexpected compression: %+v", compression)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-vf scale=1512:982:flags=lanczos") || strings.Contains(joined, "fps=30") {
+		t.Fatalf("unexpected filters: %q", joined)
 	}
 }

@@ -39,7 +39,7 @@ func TestDisposableFFmpegIntegration(t *testing.T) {
 		"-f", "lavfi", "-i", "sine=frequency=550:sample_rate=48000",
 		"-f", "lavfi", "-i", "sine=frequency=660:sample_rate=48000",
 		"-t", "6", "-map", "0:v:0", "-map", "1:a:0", "-map", "2:a:0", "-map", "3:a:0",
-		"-c:v", "h264_videotoolbox", "-b:v", "2500k", "-constant_bit_rate", "1",
+		"-c:v", "hevc_videotoolbox", "-b:v", "2500k", "-constant_bit_rate", "1",
 		"-c:a", "aac", "-b:a", "160k", source,
 	}
 	if output, err := exec.Command(cfg.FFmpegCommand, args...).CombinedOutput(); err != nil {
@@ -67,5 +67,8 @@ func TestDisposableFFmpegIntegration(t *testing.T) {
 	}
 	if result.OutputBytes >= result.SourceBytes {
 		t.Fatalf("output did not shrink: %d >= %d", result.OutputBytes, result.SourceBytes)
+	}
+	if result.Compression.VideoMode != "copy" || result.Compression.AudioTrack != 1 || result.Compression.AudioBitrateKbps != 96 {
+		t.Fatalf("unexpected compression path: %+v", result.Compression)
 	}
 }

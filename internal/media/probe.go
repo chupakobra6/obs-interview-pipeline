@@ -17,6 +17,7 @@ type Stream struct {
 	Width        int    `json:"width,omitempty"`
 	Height       int    `json:"height,omitempty"`
 	AvgFrameRate string `json:"avg_frame_rate,omitempty"`
+	BitRate      string `json:"bit_rate,omitempty"`
 }
 
 type Format struct {
@@ -32,7 +33,7 @@ type Probe struct {
 func Inspect(ctx context.Context, ffprobeCommand, path string) (Probe, error) {
 	args := []string{
 		"-v", "error",
-		"-show_entries", "format=duration,size:stream=index,codec_type,codec_name,width,height,avg_frame_rate",
+		"-show_entries", "format=duration,size:stream=index,codec_type,codec_name,width,height,avg_frame_rate,bit_rate",
 		"-of", "json",
 		path,
 	}
@@ -69,6 +70,15 @@ func (p Probe) AudioCount() int {
 	return count
 }
 
+func (p Probe) Audio() (Stream, bool) {
+	for _, stream := range p.Streams {
+		if stream.CodecType == "audio" {
+			return stream, true
+		}
+	}
+	return Stream{}, false
+}
+
 func (p Probe) DurationSeconds() float64 {
 	value, _ := strconv.ParseFloat(p.Format.Duration, 64)
 	return value
@@ -93,7 +103,11 @@ func FrameRate(value string) float64 {
 	return numerator / denominator
 }
 
-func ValidateCompressed(source, output Probe, width, height, fps int) error {
+func MatchesFrameRate(video Stream, fps int) bool {
+	return math.Abs(FrameRate(video.AvgFrameRate)-float64(fps)) <= 0.02
+}
+
+func ValidateCompressed(source, output Probe, width, height, fps, audioBitrateKbps int) error {
 	video, ok := output.Video()
 	if !ok {
 		return fmt.Errorf("compressed output has no video stream")
@@ -104,11 +118,27 @@ func ValidateCompressed(source, output Probe, width, height, fps int) error {
 	if video.Width != width || video.Height != height {
 		return fmt.Errorf("compressed dimensions are %dx%d, want %dx%d", video.Width, video.Height, width, height)
 	}
-	if actual := FrameRate(video.AvgFrameRate); math.Abs(actual-float64(fps)) > 0.02 {
+	if actual := FrameRate(video.AvgFrameRate); !MatchesFrameRate(video, fps) {
 		return fmt.Errorf("compressed frame rate is %.3f, want %d", actual, fps)
 	}
-	if output.AudioCount() != source.AudioCount() {
-		return fmt.Errorf("compressed audio stream count is %d, want %d", output.AudioCount(), source.AudioCount())
+	if source.AudioCount() == 0 {
+		return fmt.Errorf("source has no master audio stream")
+	}
+	if output.AudioCount() != 1 {
+		return fmt.Errorf("compressed audio stream count is %d, want 1 master stream", output.AudioCount())
+	}
+	audio, _ := output.Audio()
+	if audio.CodecName != "aac" {
+		return fmt.Errorf("compressed audio codec is %q, want aac", audio.CodecName)
+	}
+	bitRate, err := strconv.Atoi(audio.BitRate)
+	if err != nil || bitRate <= 0 {
+		return fmt.Errorf("compressed audio bitrate is unavailable")
+	}
+	target := audioBitrateKbps * 1000
+	maximum := target + target/4
+	if bitRate > maximum {
+		return fmt.Errorf("compressed audio bitrate is %d, want no more than approximately %d", bitRate, target)
 	}
 	sourceDuration := source.DurationSeconds()
 	outputDuration := output.DurationSeconds()

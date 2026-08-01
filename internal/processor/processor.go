@@ -16,32 +16,81 @@ import (
 )
 
 type Compressor interface {
-	Compress(context.Context, string, string) error
+	Compress(context.Context, string, string, media.Probe) (Compression, error)
+}
+
+type Compression struct {
+	VideoMode        string   `json:"video_mode"`
+	VideoFilters     []string `json:"video_filters,omitempty"`
+	AudioTrack       int      `json:"audio_track"`
+	AudioBitrateKbps int      `json:"audio_bitrate_kbps"`
 }
 
 type FFmpegCompressor struct {
 	Config config.Config
 }
 
-func (c FFmpegCompressor) Compress(ctx context.Context, inputPath, outputPath string) error {
-	filter := fmt.Sprintf("scale=%d:%d:flags=lanczos,fps=%d", c.Config.OutputWidth, c.Config.OutputHeight, c.Config.OutputFPS)
-	args := []string{
-		"-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-		"-i", inputPath,
-		"-map", "0:v:0", "-map", "0:a?",
-		"-map_metadata", "0", "-map_chapters", "0",
-		"-vf", filter,
-		"-c:v", "hevc_videotoolbox", "-tag:v", "hvc1", "-q:v", fmt.Sprintf("%d", c.Config.VideoQuality),
-		"-c:a", "copy",
-		"-max_muxing_queue_size", "4096",
-		"-movflags", "+faststart",
-		outputPath,
+func (c FFmpegCompressor) Compress(ctx context.Context, inputPath, outputPath string, source media.Probe) (Compression, error) {
+	compression, args, err := c.command(inputPath, outputPath, source)
+	if err != nil {
+		return Compression{}, err
 	}
 	output, err := exec.CommandContext(ctx, c.Config.FFmpegCommand, args...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("compress video: %w: %s", err, compact(output))
+		return Compression{}, fmt.Errorf("compress video: %w: %s", err, compact(output))
 	}
-	return nil
+	return compression, nil
+}
+
+func (c FFmpegCompressor) command(inputPath, outputPath string, source media.Probe) (Compression, []string, error) {
+	video, ok := source.Video()
+	if !ok {
+		return Compression{}, nil, fmt.Errorf("source has no video stream")
+	}
+	if source.AudioCount() == 0 {
+		return Compression{}, nil, fmt.Errorf("source has no master audio stream")
+	}
+	filters := make([]string, 0, 2)
+	if video.Width != c.Config.OutputWidth || video.Height != c.Config.OutputHeight {
+		filters = append(filters, fmt.Sprintf("scale=%d:%d:flags=lanczos", c.Config.OutputWidth, c.Config.OutputHeight))
+	}
+	if !media.MatchesFrameRate(video, c.Config.OutputFPS) {
+		filters = append(filters, fmt.Sprintf("fps=%d", c.Config.OutputFPS))
+	}
+	copyVideo := video.CodecName == "hevc" && len(filters) == 0
+	videoMode := "transcode"
+	if copyVideo {
+		videoMode = "copy"
+	}
+	compression := Compression{
+		VideoMode:        videoMode,
+		VideoFilters:     filters,
+		AudioTrack:       1,
+		AudioBitrateKbps: c.Config.AudioBitrateKbps,
+	}
+	args := []string{
+		"-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+		"-i", inputPath,
+		"-map", "0:v:0", "-map", "0:a:0",
+		"-map_metadata", "0", "-map_chapters", "0",
+	}
+	if len(filters) > 0 {
+		args = append(args, "-vf", strings.Join(filters, ","))
+	}
+	if copyVideo {
+		args = append(args, "-c:v", "copy", "-tag:v", "hvc1")
+	} else {
+		args = append(args,
+			"-c:v", "hevc_videotoolbox", "-tag:v", "hvc1", "-q:v", fmt.Sprintf("%d", c.Config.VideoQuality),
+		)
+	}
+	args = append(args,
+		"-c:a", "aac", "-b:a", fmt.Sprintf("%dk", c.Config.AudioBitrateKbps),
+		"-max_muxing_queue_size", "4096",
+		"-movflags", "+faststart",
+		outputPath,
+	)
+	return compression, args, nil
 }
 
 type ProbeFunc func(context.Context, string, string) (media.Probe, error)
@@ -56,15 +105,16 @@ type Pipeline struct {
 }
 
 type Result struct {
-	SourcePath     string     `json:"source_path"`
-	FinalDir       string     `json:"final_dir"`
-	VideoPath      string     `json:"video_path"`
-	TranscriptPath string     `json:"transcript_path"`
-	ManifestPath   string     `json:"manifest_path"`
-	SourceBytes    int64      `json:"source_bytes"`
-	OutputBytes    int64      `json:"output_bytes"`
-	ASR            asr.Result `json:"asr"`
-	CompletedAt    time.Time  `json:"completed_at"`
+	SourcePath     string      `json:"source_path"`
+	FinalDir       string      `json:"final_dir"`
+	VideoPath      string      `json:"video_path"`
+	TranscriptPath string      `json:"transcript_path"`
+	ManifestPath   string      `json:"manifest_path"`
+	SourceBytes    int64       `json:"source_bytes"`
+	OutputBytes    int64       `json:"output_bytes"`
+	ASR            asr.Result  `json:"asr"`
+	Compression    Compression `json:"compression"`
+	CompletedAt    time.Time   `json:"completed_at"`
 }
 
 type manifest struct {
@@ -73,6 +123,7 @@ type manifest struct {
 	SourceProbe media.Probe `json:"source_probe"`
 	OutputProbe media.Probe `json:"output_probe"`
 	ASR         asr.Result  `json:"asr"`
+	Compression Compression `json:"compression"`
 	CompletedAt time.Time   `json:"completed_at"`
 }
 
@@ -136,14 +187,22 @@ func (p Pipeline) Process(ctx context.Context, inputPath string) (Result, error)
 		err    error
 	}
 	asrDone := make(chan asrOutcome, 1)
-	compressDone := make(chan error, 1)
+	type compressOutcome struct {
+		result Compression
+		err    error
+	}
+	compressDone := make(chan compressOutcome, 1)
 	go func() {
 		result, runErr := p.Transcriber.Transcribe(workCtx, resolvedInput, workDir)
 		asrDone <- asrOutcome{result: result, err: runErr}
 	}()
-	go func() { compressDone <- p.Compressor.Compress(workCtx, resolvedInput, tempVideo) }()
+	go func() {
+		result, compressErr := p.Compressor.Compress(workCtx, resolvedInput, tempVideo, sourceProbe)
+		compressDone <- compressOutcome{result: result, err: compressErr}
+	}()
 
 	var asrResult asr.Result
+	var compression Compression
 	var firstErr error
 	for asrDone != nil || compressDone != nil {
 		select {
@@ -154,10 +213,11 @@ func (p Pipeline) Process(ctx context.Context, inputPath string) (Result, error)
 				firstErr = fmt.Errorf("transcribe: %w", outcome.err)
 				cancel()
 			}
-		case compressErr := <-compressDone:
+		case outcome := <-compressDone:
 			compressDone = nil
-			if compressErr != nil && firstErr == nil {
-				firstErr = compressErr
+			compression = outcome.result
+			if outcome.err != nil && firstErr == nil {
+				firstErr = outcome.err
 				cancel()
 			}
 		}
@@ -170,7 +230,7 @@ func (p Pipeline) Process(ctx context.Context, inputPath string) (Result, error)
 	if err != nil {
 		return Result{}, fmt.Errorf("probe compressed output: %w", err)
 	}
-	if err := media.ValidateCompressed(sourceProbe, outputProbe, p.Config.OutputWidth, p.Config.OutputHeight, p.Config.OutputFPS); err != nil {
+	if err := media.ValidateCompressed(sourceProbe, outputProbe, p.Config.OutputWidth, p.Config.OutputHeight, p.Config.OutputFPS, p.Config.AudioBitrateKbps); err != nil {
 		return Result{}, fmt.Errorf("validate compressed output: %w", err)
 	}
 	if err := writeTranscript(tempTranscript, stem, asrResult); err != nil {
@@ -183,6 +243,7 @@ func (p Pipeline) Process(ctx context.Context, inputPath string) (Result, error)
 		SourceProbe: sourceProbe,
 		OutputProbe: outputProbe,
 		ASR:         asrResult,
+		Compression: compression,
 		CompletedAt: completedAt,
 	}
 	if err := writeJSON(tempManifest, manifestValue); err != nil {
@@ -224,6 +285,7 @@ func (p Pipeline) Process(ctx context.Context, inputPath string) (Result, error)
 		SourceBytes:    sourceProbe.SizeBytes(),
 		OutputBytes:    outputProbe.SizeBytes(),
 		ASR:            asrResult,
+		Compression:    compression,
 		CompletedAt:    completedAt,
 	}, nil
 }
@@ -251,7 +313,7 @@ func (p Pipeline) finishExisting(ctx context.Context, inputPath, finalDir, video
 	if err != nil {
 		return Result{}, fmt.Errorf("probe source before retry deletion: %w", err)
 	}
-	if err := media.ValidateCompressed(currentSource, currentOutput, p.Config.OutputWidth, p.Config.OutputHeight, p.Config.OutputFPS); err != nil {
+	if err := media.ValidateCompressed(currentSource, currentOutput, p.Config.OutputWidth, p.Config.OutputHeight, p.Config.OutputFPS, p.Config.AudioBitrateKbps); err != nil {
 		return Result{}, fmt.Errorf("validate existing compressed output: %w", err)
 	}
 	if p.Config.DeleteSourceOnSuccess {
@@ -268,6 +330,7 @@ func (p Pipeline) finishExisting(ctx context.Context, inputPath, finalDir, video
 		SourceBytes:    currentSource.SizeBytes(),
 		OutputBytes:    currentOutput.SizeBytes(),
 		ASR:            saved.ASR,
+		Compression:    saved.Compression,
 		CompletedAt:    saved.CompletedAt,
 	}, nil
 }
