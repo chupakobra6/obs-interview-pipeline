@@ -124,7 +124,7 @@ func loadConfigArgs(home, name string, args []string) (config.Config, []string, 
 func install(home string, stdout io.Writer) error {
 	cfgPath := config.DefaultPath(home)
 	cfg := config.Default(home)
-	if existing, err := config.Load(cfgPath); err == nil {
+	if existing, err := config.LoadForInstall(cfgPath, cfg); err == nil {
 		cfg = existing
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("existing config is invalid: %w", err)
@@ -133,6 +133,9 @@ func install(home string, stdout io.Writer) error {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}
+	}
+	if err := installNotifier(cfg); err != nil {
+		return err
 	}
 	if err := config.Write(cfgPath, cfg); err != nil {
 		return err
@@ -180,15 +183,29 @@ func doctor(ctx context.Context, cfg config.Config, stdout io.Writer) error {
 	}
 	var checks []check
 	for name, path := range map[string]string{
-		"ffmpeg":             cfg.FFmpegCommand,
-		"ffprobe":            cfg.FFprobeCommand,
-		"whisper-server":     cfg.WhisperServerCommand,
-		"whisper-gate":       cfg.WhisperGateCommand,
-		"whisper-model":      cfg.WhisperModelPath,
-		"whisper-gate-model": cfg.WhisperGateModelPath,
+		"ffmpeg":                 cfg.FFmpegCommand,
+		"ffprobe":                cfg.FFprobeCommand,
+		"make":                   cfg.MakeCommand,
+		"telegram-harvest":       cfg.TelegramHarvestCommand,
+		"obs-interview-notifier": cfg.NotifierCommand,
+		"swiftc":                 "/usr/bin/swiftc",
 	} {
 		info, err := os.Stat(path)
 		checks = append(checks, check{Name: name, OK: err == nil && !info.IsDir(), Detail: path})
+	}
+	rootInfo, rootErr := os.Stat(cfg.TelegramHarvestRoot)
+	checks = append(checks, check{Name: "telegram-harvest-root", OK: rootErr == nil && rootInfo.IsDir(), Detail: cfg.TelegramHarvestRoot})
+	notifierApp := notifierApplicationPath(cfg.NotifierCommand)
+	signOutput, signErr := exec.CommandContext(ctx, "/usr/bin/codesign", "--verify", "--deep", "--strict", notifierApp).CombinedOutput()
+	checks = append(checks, check{Name: "notifier-signature", OK: signErr == nil, Detail: oneLineDetail(string(signOutput))})
+	buildOutput, buildErr := exec.CommandContext(ctx, cfg.MakeCommand, "-s", "-C", cfg.TelegramHarvestRoot, "build").CombinedOutput()
+	checks = append(checks, check{Name: "telegram-harvest-build", OK: buildErr == nil, Detail: oneLineDetail(string(buildOutput))})
+	if buildErr == nil {
+		asrCheck := exec.CommandContext(ctx, cfg.TelegramHarvestCommand, "--profile", "main", "transcribe-file", "--check")
+		asrCheck.Dir = cfg.TelegramHarvestRoot
+		asrOutput, asrErr := asrCheck.CombinedOutput()
+		asrOK := asrErr == nil && strings.Contains(string(asrOutput), `"contract_version": 1`) && strings.Contains(string(asrOutput), `"accelerator": "metal"`)
+		checks = append(checks, check{Name: "telegram-harvest-asr", OK: asrOK, Detail: oneLineDetail(string(asrOutput))})
 	}
 	encoderOutput, encoderErr := exec.CommandContext(ctx, cfg.FFmpegCommand, "-hide_banner", "-encoders").CombinedOutput()
 	checks = append(checks, check{Name: "hevc_videotoolbox", OK: encoderErr == nil && strings.Contains(string(encoderOutput), "hevc_videotoolbox"), Detail: "Apple VideoToolbox HEVC encoder"})
@@ -230,24 +247,107 @@ func runQueue(ctx context.Context, cfg config.Config, stdout, stderr io.Writer) 
 			}
 			if processErr != nil {
 				fmt.Fprintf(stderr, "%s failed %s: %v\n", time.Now().Format(time.RFC3339), job.Path, processErr)
-				notify(cfg, "Ошибка обработки OBS", filepath.Base(job.Path)+": "+processErr.Error())
+				notify(cfg, "Ошибка обработки OBS", filepath.Base(job.Path)+": "+processErr.Error(), filepath.Dir(job.Path))
 				continue
 			}
 			fmt.Fprintf(stdout, "%s completed %s -> %s (%d -> %d bytes)\n", time.Now().Format(time.RFC3339), job.Path, result.FinalDir, result.SourceBytes, result.OutputBytes)
-			notify(cfg, "Запись OBS обработана", filepath.Base(job.Path)+" — видео и расшифровка готовы")
+			notify(cfg, "Запись OBS обработана", filepath.Base(job.Path)+" — видео и расшифровка готовы", result.FinalDir)
 		}
 		return nil
 	})
 }
 
-func notify(cfg config.Config, title, message string) {
+func notify(cfg config.Config, title, message, targetDir string) {
 	if !cfg.Notifications {
 		return
 	}
-	script := `on run argv
-display notification (item 2 of argv) with title (item 1 of argv)
-end run`
-	_ = exec.Command("/usr/bin/osascript", "-e", script, title, message).Run()
+	appPath := notifierApplicationPath(cfg.NotifierCommand)
+	args := append([]string{"-n", appPath, "--args"}, notificationArgs(title, message, targetDir)...)
+	_ = exec.Command("/usr/bin/open", args...).Run()
+}
+
+func notificationArgs(title, message, targetDir string) []string {
+	return []string{"--title", title, "--message", message, "--open-dir", targetDir}
+}
+
+func notifierApplicationPath(command string) string {
+	return filepath.Dir(filepath.Dir(filepath.Dir(command)))
+}
+
+func installNotifier(cfg config.Config) error {
+	macOSDir := filepath.Dir(cfg.NotifierCommand)
+	contentsDir := filepath.Dir(macOSDir)
+	appDir := filepath.Dir(contentsDir)
+	resourcesDir := filepath.Join(contentsDir, "Resources")
+	for _, dir := range []string{macOSDir, resourcesDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("create notifier app directory: %w", err)
+		}
+	}
+	sourcePath := filepath.Join(resourcesDir, "obs_interview_notifier.swift")
+	if err := writeAtomic(sourcePath, []byte(notifierSwiftSource), 0o600); err != nil {
+		return fmt.Errorf("install notifier source: %w", err)
+	}
+	infoPlist := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key><string>obs-interview-notifier</string>
+  <key>CFBundleIdentifier</key><string>com.igor.obs-interview-notifier</string>
+  <key>CFBundleName</key><string>OBS Interview Notifier</string>
+  <key>CFBundleDisplayName</key><string>OBS Interview Notifier</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSUIElement</key><true/>
+</dict>
+</plist>
+`
+	if err := writeAtomic(filepath.Join(contentsDir, "Info.plist"), []byte(infoPlist), 0o600); err != nil {
+		return fmt.Errorf("install notifier Info.plist: %w", err)
+	}
+	temporary, err := os.CreateTemp(macOSDir, ".notifier-*")
+	if err != nil {
+		return fmt.Errorf("create temporary notifier binary: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close temporary notifier binary: %w", err)
+	}
+	if err := os.Remove(temporaryPath); err != nil {
+		return fmt.Errorf("prepare temporary notifier binary: %w", err)
+	}
+	defer os.Remove(temporaryPath)
+	output, err := exec.Command(
+		"/usr/bin/swiftc",
+		"-swift-version", "5",
+		"-O",
+		"-framework", "AppKit",
+		"-framework", "UserNotifications",
+		sourcePath,
+		"-o", temporaryPath,
+	).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("compile notifier app: %w: %s", err, oneLineDetail(string(output)))
+	}
+	if err := os.Chmod(temporaryPath, 0o755); err != nil {
+		return fmt.Errorf("chmod notifier app: %w", err)
+	}
+	if err := os.Rename(temporaryPath, cfg.NotifierCommand); err != nil {
+		return fmt.Errorf("publish notifier app: %w", err)
+	}
+	signOutput, signErr := exec.Command(
+		"/usr/bin/codesign",
+		"--force",
+		"--deep",
+		"--sign", "-",
+		"--identifier", "com.igor.obs-interview-notifier",
+		appDir,
+	).CombinedOutput()
+	if signErr != nil {
+		return fmt.Errorf("sign notifier app: %w: %s", signErr, oneLineDetail(string(signOutput)))
+	}
+	return nil
 }
 
 func launchAgentPlist(binary, cfgPath string, cfg config.Config) string {
@@ -357,6 +457,14 @@ func firstLine(value string) string {
 	value = strings.TrimSpace(value)
 	if index := strings.IndexByte(value, '\n'); index >= 0 {
 		return value[:index]
+	}
+	return value
+}
+
+func oneLineDetail(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if len(value) > 500 {
+		return value[:500] + "..."
 	}
 	return value
 }

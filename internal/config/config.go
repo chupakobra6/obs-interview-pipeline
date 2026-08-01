@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,50 +10,51 @@ import (
 )
 
 const (
+	CurrentVersion   = 3
 	AppDirName       = "obs-interview-pipeline"
 	ConfigFileName   = "config.json"
 	LaunchAgentLabel = "com.igor.obs-interview-processor"
 )
 
 type Config struct {
-	AllowedInputDir       string `json:"allowed_input_dir"`
-	OutputDir             string `json:"output_dir"`
-	StateDir              string `json:"state_dir"`
-	FFmpegCommand         string `json:"ffmpeg_command"`
-	FFprobeCommand        string `json:"ffprobe_command"`
-	WhisperServerCommand  string `json:"whisper_server_command"`
-	WhisperModelPath      string `json:"whisper_model_path"`
-	WhisperGateCommand    string `json:"whisper_gate_command"`
-	WhisperGateModelPath  string `json:"whisper_gate_model_path"`
-	OutputWidth           int    `json:"output_width"`
-	OutputHeight          int    `json:"output_height"`
-	OutputFPS             int    `json:"output_fps"`
-	VideoQuality          int    `json:"video_quality"`
-	DeleteSourceOnSuccess bool   `json:"delete_source_on_success"`
-	Notifications         bool   `json:"notifications"`
+	Version                int    `json:"version"`
+	AllowedInputDir        string `json:"allowed_input_dir"`
+	OutputDir              string `json:"output_dir"`
+	StateDir               string `json:"state_dir"`
+	FFmpegCommand          string `json:"ffmpeg_command"`
+	FFprobeCommand         string `json:"ffprobe_command"`
+	TelegramHarvestRoot    string `json:"telegram_harvest_root"`
+	TelegramHarvestCommand string `json:"telegram_harvest_command"`
+	MakeCommand            string `json:"make_command"`
+	NotifierCommand        string `json:"notifier_command"`
+	OutputWidth            int    `json:"output_width"`
+	OutputHeight           int    `json:"output_height"`
+	OutputFPS              int    `json:"output_fps"`
+	VideoQuality           int    `json:"video_quality"`
+	DeleteSourceOnSuccess  bool   `json:"delete_source_on_success"`
+	Notifications          bool   `json:"notifications"`
 }
 
 func Default(home string) Config {
 	appSupport := filepath.Join(home, "Library", "Application Support", AppDirName)
 	harvest := filepath.Join(home, "projects", "telegram-harvest")
-	whisperBin := filepath.Join(harvest, ".state", "asr-runtime", "whisper.cpp", "build-metal", "bin")
-	whisperModels := filepath.Join(harvest, ".state", "asr-runtime", "whisper.cpp", "models")
 	return Config{
-		AllowedInputDir:       filepath.Join(home, "Movies"),
-		OutputDir:             filepath.Join(home, "Movies", "Interviews"),
-		StateDir:              appSupport,
-		FFmpegCommand:         "/opt/homebrew/bin/ffmpeg",
-		FFprobeCommand:        "/opt/homebrew/bin/ffprobe",
-		WhisperServerCommand:  filepath.Join(whisperBin, "whisper-server"),
-		WhisperModelPath:      filepath.Join(whisperModels, "ggml-large-v3-turbo-q5_0.bin"),
-		WhisperGateCommand:    filepath.Join(whisperBin, "whisper-vad-speech-segments"),
-		WhisperGateModelPath:  filepath.Join(whisperModels, "ggml-silero-v6.2.0.bin"),
-		OutputWidth:           1512,
-		OutputHeight:          982,
-		OutputFPS:             30,
-		VideoQuality:          60,
-		DeleteSourceOnSuccess: true,
-		Notifications:         true,
+		Version:                CurrentVersion,
+		AllowedInputDir:        filepath.Join(home, "Movies"),
+		OutputDir:              filepath.Join(home, "Movies", "Interviews"),
+		StateDir:               appSupport,
+		FFmpegCommand:          "/opt/homebrew/bin/ffmpeg",
+		FFprobeCommand:         "/opt/homebrew/bin/ffprobe",
+		TelegramHarvestRoot:    harvest,
+		TelegramHarvestCommand: filepath.Join(harvest, "bin", "telegram-harvest"),
+		MakeCommand:            "/usr/bin/make",
+		NotifierCommand:        filepath.Join(appSupport, "OBS Interview Notifier.app", "Contents", "MacOS", "obs-interview-notifier"),
+		OutputWidth:            1512,
+		OutputHeight:           982,
+		OutputFPS:              30,
+		VideoQuality:           60,
+		DeleteSourceOnSuccess:  true,
+		Notifications:          true,
 	}
 }
 
@@ -66,8 +68,38 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
 	var cfg Config
-	if err := json.Unmarshal(payload, &cfg); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// LoadForInstall overlays an existing configuration on current defaults. It
+// is used only by install to migrate older config files and immediately writes
+// the normalized current schema back to disk.
+func LoadForInstall(path string, defaults Config) (Config, error) {
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, err
+	}
+	var stored struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(payload, &stored); err != nil {
+		return Config{}, fmt.Errorf("decode existing config version: %w", err)
+	}
+	cfg := defaults
+	if err := json.Unmarshal(payload, &cfg); err != nil {
+		return Config{}, fmt.Errorf("decode existing config for migration: %w", err)
+	}
+	cfg.Version = CurrentVersion
+	if stored.Version < CurrentVersion {
+		cfg.NotifierCommand = defaults.NotifierCommand
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -121,16 +153,19 @@ func (c Config) LogsDir() string   { return filepath.Join(c.StateDir, "logs") }
 func (c Config) WorkDir() string   { return filepath.Join(c.StateDir, "work") }
 
 func (c Config) Validate() error {
+	if c.Version != CurrentVersion {
+		return fmt.Errorf("config version must be %d; run install to migrate it", CurrentVersion)
+	}
 	for name, value := range map[string]string{
-		"allowed_input_dir":       c.AllowedInputDir,
-		"output_dir":              c.OutputDir,
-		"state_dir":               c.StateDir,
-		"ffmpeg_command":          c.FFmpegCommand,
-		"ffprobe_command":         c.FFprobeCommand,
-		"whisper_server_command":  c.WhisperServerCommand,
-		"whisper_model_path":      c.WhisperModelPath,
-		"whisper_gate_command":    c.WhisperGateCommand,
-		"whisper_gate_model_path": c.WhisperGateModelPath,
+		"allowed_input_dir":        c.AllowedInputDir,
+		"output_dir":               c.OutputDir,
+		"state_dir":                c.StateDir,
+		"ffmpeg_command":           c.FFmpegCommand,
+		"ffprobe_command":          c.FFprobeCommand,
+		"telegram_harvest_root":    c.TelegramHarvestRoot,
+		"telegram_harvest_command": c.TelegramHarvestCommand,
+		"make_command":             c.MakeCommand,
+		"notifier_command":         c.NotifierCommand,
 	} {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("config %s is empty", name)

@@ -108,20 +108,21 @@ func TestPipelineFailureKeepsSourceAndPublishesNothing(t *testing.T) {
 
 func testConfig(dir string) config.Config {
 	return config.Config{
-		AllowedInputDir:       filepath.Join(dir, "input"),
-		OutputDir:             filepath.Join(dir, "output"),
-		StateDir:              filepath.Join(dir, "state"),
-		FFmpegCommand:         "ffmpeg",
-		FFprobeCommand:        "ffprobe",
-		WhisperServerCommand:  "whisper-server",
-		WhisperModelPath:      "model.bin",
-		WhisperGateCommand:    "whisper-gate",
-		WhisperGateModelPath:  "gate.bin",
-		OutputWidth:           1512,
-		OutputHeight:          982,
-		OutputFPS:             30,
-		VideoQuality:          60,
-		DeleteSourceOnSuccess: true,
+		Version:                config.CurrentVersion,
+		AllowedInputDir:        filepath.Join(dir, "input"),
+		OutputDir:              filepath.Join(dir, "output"),
+		StateDir:               filepath.Join(dir, "state"),
+		FFmpegCommand:          "ffmpeg",
+		FFprobeCommand:         "ffprobe",
+		TelegramHarvestRoot:    filepath.Join(dir, "telegram-harvest"),
+		TelegramHarvestCommand: "telegram-harvest",
+		MakeCommand:            "make",
+		NotifierCommand:        filepath.Join(dir, "OBS Interview Notifier.app", "Contents", "MacOS", "obs-interview-notifier"),
+		OutputWidth:            1512,
+		OutputHeight:           982,
+		OutputFPS:              30,
+		VideoQuality:           60,
+		DeleteSourceOnSuccess:  true,
 	}
 }
 

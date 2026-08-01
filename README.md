@@ -5,7 +5,7 @@
 ## Что происходит после остановки записи
 
 1. Lua-hook получает от OBS точный путь последней завершённой записи и кладёт его в локальную очередь.
-2. macOS `LaunchAgent` запускает один worker. Worker параллельно транскрибирует первую аудиодорожку и кодирует видео через Apple VideoToolbox.
+2. macOS `LaunchAgent` запускает один worker. Worker параллельно вызывает канонический `telegram-harvest transcribe-file` и кодирует видео через Apple VideoToolbox.
 3. Результат проходит проверку кодека, разрешения, fps, длительности, числа аудиодорожек и размера.
 4. Готовая пара публикуется одним переименованием каталога. Только после этого исходник удаляется.
 
@@ -27,11 +27,19 @@
 - Частота: `30 fps`.
 - Source: H.264 + все выбранные в OBS AAC-дорожки.
 - Final: H.265/HEVC `1512x982@30` через `hevc_videotoolbox`; AAC-дорожки копируются без перекодирования.
-- ASR: тот же локальный runtime, что у Telegram Harvest — `large-v3-turbo-q5_0`, русский язык, 4 threads, beam size 5, whole-file Silero gate и обязательное подтверждение Metal.
+- ASR: production-вход Telegram Harvest. OBS-проект не хранит собственную Whisper/VAD-реализацию, профиль или пути моделей; перед каждым job быстрый `make build` подхватывает изменения Harvest при необходимости.
+- Уведомление: клик по success notification открывает Finder сразу в каталоге готового собеседования.
 
 ## Установка и проверка
 
+Требуются macOS, OBS Studio, Go, соседний `/Users/igor/projects/telegram-harvest` с готовым ASR runtime и `ffmpeg`:
+
 ```bash
+brew install ffmpeg
+```
+
+```bash
+make setup
 make check
 make install
 make doctor
@@ -42,6 +50,9 @@ make doctor
 - бинарник и конфигурацию в `~/Library/Application Support/obs-interview-pipeline`;
 - Lua-hook в `~/Library/Application Support/obs-studio/scripts`;
 - `com.igor.obs-interview-processor.plist` в `~/Library/LaunchAgents`.
+- собственный `OBS Interview Notifier.app` в каталоге pipeline; внешняя notification-утилита не нужна.
+
+Повторный `make install` мигрирует старую конфигурацию: удаляет дублированные Whisper/model keys и сохраняет пользовательские output/quality/delete settings.
 
 Lua-hook один раз добавляется через `OBS → Сервис → Скрипты`. OBS сохраняет путь в текущей коллекции сцен и загружает скрипт при следующих запусках.
 
@@ -59,6 +70,7 @@ Lua-hook один раз добавляется через `OBS → Сервис
 - `queue/` содержит ожидающие записи; наличие файла автоматически будит worker.
 - `done/` и `failed/` сохраняют компактный статус каждого задания.
 - `logs/processor.log` и `logs/processor-error.log` показывают фоновые запуски.
+- success notification открывает `~/Movies/Interviews/<recording>/`; error notification — каталог исходной записи. Для `OBS Interview Notifier` используется стиль «Временно»: баннер исчезает с экрана, но остаётся в Центре уведомлений. Невидимый helper живёт до клика, поэтому отложенный клик всё равно открывает нужную папку.
 
 Проверка окружения:
 
@@ -76,18 +88,19 @@ bin/obs-interview-processor enqueue "/Users/igor/Movies/recording.mp4"
 
 - Worker не сканирует старые файлы в `~/Movies`; он обрабатывает только пути, переданные OBS hook.
 - Вход обязан быть обычным непустым `.mp4`, `.mov` или `.mkv` внутри `allowed_input_dir`.
-- Jobs выполняются последовательно: два Whisper/VideoToolbox pipeline одновременно не запускаются.
+- Jobs выполняются последовательно: два ASR/VideoToolbox pipeline одновременно не запускаются.
 - При ошибке ASR, компрессии, проверки, публикации или удаления исходник остаётся на месте.
 - Если output не меньше source, проверка не проходит и исходник сохраняется.
 - Повтор после сбоя удаления заново проверяет уже опубликованные результаты и только затем повторяет удаление source.
 
 ## Проверенный сквозной сценарий
 
-Реальный тест 2026-08-01 прошёл через OBS event, Lua-hook, `LaunchAgent`, production Whisper и VideoToolbox:
+Реальный тест 2026-08-01 прошёл через OBS event, Lua-hook, `LaunchAgent`, общий ASR-контракт Telegram Harvest и VideoToolbox:
 
-- source: H.264, `1512x982@30`, 3 AAC tracks, 29.47 секунды, 23,526,751 байт;
-- final: HEVC, `1512x982@30`, те же 3 AAC tracks, 29.50 секунды, 5,877,841 байт;
-- размер уменьшился примерно на 75%;
+- source: H.264, `1512x982@30`, 3 AAC tracks, 21.03 секунды, 16,765,693 байта;
+- final: HEVC, `1512x982@30`, те же 3 AAC tracks, 21.07 секунды, 8,745,466 байт;
+- размер уменьшился примерно на 48%;
 - синтезированная русская фраза распознана полностью;
-- `metal_confirmed=true`;
+- manifest зафиксировал contract v1, `whispercpp`, `large-v3-turbo-q5_0`, русский язык и `metal_confirmed=true`;
 - source отсутствовал после успешной публикации и проверки.
+- UI-проверка временного notification открыла Finder точно в каталоге результата.
