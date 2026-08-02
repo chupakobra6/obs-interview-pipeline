@@ -77,6 +77,29 @@ ID источника: `S012`
 - Median inference составил 48.48 s для `0` и 50.86 s для `-1`; выигрыша скорости нет.
 - Production-правка отклонена как no-op. Реальная причина коротких строк — native timestamp segmentation, а не `max_len`.
 
+### Адаптивный многоязычный выбор long-form ASR
+
+ID источника: `S013`
+
+Исходный ввод сохранён без подмены решения в `.project-loop/intake/raw/adaptive-multilingual-asr-selection.md`.
+
+Нормализация:
+- [x] не принимать статический русский prompt только по одному удачному A/B;
+- [x] сравнить архитектурные семейства на русском, английском и edge cases с известным текстом;
+- [x] выбрать лучший баланс quality/performance/implementation, сохранив large-v3-turbo-q5_0 и Metal;
+- [x] оставить один адаптивный OBS long-form профиль и минимально необходимый Telegram profile set;
+- [x] включить transcript-affecting policy в descriptor/cache identity и обновить OBS только по публичному контракту;
+- [x] доказать отсутствие prompt leakage, language mixing, потери начала/хвоста, repetition и существенного замедления.
+
+Маршрутизация:
+- [x] исходный ввод сохранён
+- [x] карта источников обновлена
+- [x] чеклист обновлён
+- [x] план и текущий шаг обновлены
+- [x] benchmark matrix завершена
+- [x] выбранная политика реализована и проверена
+- [x] reviewer проверил и handoff обновлён
+
 ### Канонический ASR Telegram Harvest и кликабельное уведомление
 
 ID источника: `S003`

@@ -9,8 +9,24 @@
 
 ## Текущий Шаг
 
-- active step: `STEP-008R`
+- active step: `STEP-009R`
 - status: `готово`
+
+## Новая Дельта S013
+
+- Удачный punctuated-initial-context A/B принят как сильный кандидат, но не как заранее выбранное решение.
+- Нужно сравнить native baseline, статический/языково-адаптивный style prompt и один dynamic bootstrap на одинаковой large-v3-turbo-q5_0/Metal базе; multi-chunk остаётся последним кандидатом.
+- Corpus должен включать русский и английский ground truth, edge cases и реальное интервью с честно обозначенным silver reference.
+- Итоговая production surface: основной Telegram ASR и один адаптивный OBS long-form profile; третий профиль остаётся только при подтверждённом caller/use case.
+- Рабочие деревья Telegram Harvest и OBS перед STEP-009A чисты; упомянутые в отчёте Яна чужие изменения отсутствуют.
+- Benchmark завершён: universal/bilingual/language-matched prompt и content bootstrap дали повторы на длинном English; punctuation-only потерял текст; carry вышел за audio и выдумал титры.
+- Выбрана одна policy: 15 s language-only probe; RU — minimal punctuation seed без carry, EN — без prompt, остальные — auto без prompt; затем один native timestamped decode.
+- Реальный current-head: 1529 слов, 253 знака, pseudo-WER 18,71%, recall 94,75%, F1 90,08%, wall 53,32 с; VAD/ASR gap 0,33 с; greeting/farewell сохранены.
+- Contract/profile подняты до `3 / trusted-long-form-v3`; `--assume-speech` и `trusted-speech-v1` удалены как неиспользуемые, остаются два публичных ASR profile.
+- `make check` и `go test -race ./...` зелёные в обоих репозиториях; installed `make doctor` принял v3.
+- Installed disposable E2E распознал English без prompt, сохранил 3 AAC и получил HEVC 1512x982@30: 12 653 787 → 4 431 383 bytes; `delete_source=false` сохранил source.
+- Первый почти пустой HEVC fixture был штатно отклонён delete/media gate как не уменьшающий размер; более репрезентативный H.264 fixture прошёл весь flow.
+- Временный `/tmp/obs-asr-policy.23ljVp` с corpus/results/disposable media перемещён в Корзину; процессы Whisper/benchmark и временные installed-state хвосты отсутствуют.
 
 ## Новая Дельта S012
 

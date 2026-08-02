@@ -17,15 +17,16 @@ func TestDecodeHarvestResponseValidatesContractAndTranscript(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload, err := json.Marshal(harvestResponse{
-		ContractVersion:  harvestContractVersion,
-		Status:           "ok",
-		ProfileID:        harvestProfileID,
-		ValidationStatus: harvestValidationCoverage,
-		Text:             "Проверка общей расшифровки.",
-		SpeechDetected:   true,
-		Engine:           "whispercpp",
-		Backend:          json.RawMessage(`{"owned_by":"telegram-harvest"}`),
-		Diagnostics:      json.RawMessage(`{"opaque":true}`),
+		ContractVersion:   harvestContractVersion,
+		Status:            "ok",
+		ProfileID:         harvestProfileID,
+		ValidationStatus:  harvestValidationCoverage,
+		Text:              "Проверка общей расшифровки.",
+		SpeechDetected:    true,
+		Engine:            "whispercpp",
+		Backend:           json.RawMessage(`{"owned_by":"telegram-harvest"}`),
+		Diagnostics:       json.RawMessage(`{"opaque":true}`),
+		LanguageDetection: 750000000,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -35,7 +36,8 @@ func TestDecodeHarvestResponseValidatesContractAndTranscript(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.ContractVersion != harvestContractVersion || result.ProfileID != harvestProfileID ||
-		result.ValidationStatus != harvestValidationCoverage || result.Engine != "whispercpp" || !json.Valid(result.Diagnostics) {
+		result.ValidationStatus != harvestValidationCoverage || result.Engine != "whispercpp" ||
+		result.LanguageDetection != 750000000 || !json.Valid(result.Diagnostics) {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 }
@@ -117,7 +119,7 @@ func TestDecodeHarvestResponseRejectsTranscriptMismatch(t *testing.T) {
 	}
 }
 
-func TestDecodeHarvestResponseRejectsEmptyAssumedSpeech(t *testing.T) {
+func TestDecodeHarvestResponseRejectsEmptyTrustedLongForm(t *testing.T) {
 	dir := t.TempDir()
 	transcriptPath := filepath.Join(dir, "transcript.txt")
 	if err := os.WriteFile(transcriptPath, nil, 0o600); err != nil {
@@ -138,14 +140,14 @@ func TestDecodeHarvestResponseRejectsEmptyAssumedSpeech(t *testing.T) {
 }
 
 func TestValidateRuntimeCheckResponseUsesPublicContract(t *testing.T) {
-	payload := []byte(`{"contract_version":2,"status":"ok","profile_id":"trusted-long-form-v2","validation_status":"runtime-ready","backend":{"arbitrary":true}}`)
+	payload := []byte(`{"contract_version":3,"status":"ok","profile_id":"trusted-long-form-v3","validation_status":"runtime-ready","backend":{"arbitrary":true}}`)
 	if err := ValidateRuntimeCheckResponse(payload); err != nil {
 		t.Fatal(err)
 	}
 	for _, invalid := range [][]byte{
-		[]byte(`{"contract_version":1,"status":"ok","profile_id":"trusted-long-form-v2","validation_status":"runtime-ready"}`),
-		[]byte(`{"contract_version":2,"status":"ok","profile_id":"short-message-v1","validation_status":"runtime-ready"}`),
-		[]byte(`{"contract_version":2,"status":"ok","profile_id":"trusted-long-form-v2","validation_status":"coverage-validated"}`),
+		[]byte(`{"contract_version":2,"status":"ok","profile_id":"trusted-long-form-v3","validation_status":"runtime-ready"}`),
+		[]byte(`{"contract_version":3,"status":"ok","profile_id":"short-message-v1","validation_status":"runtime-ready"}`),
+		[]byte(`{"contract_version":3,"status":"ok","profile_id":"trusted-long-form-v3","validation_status":"coverage-validated"}`),
 	} {
 		if err := ValidateRuntimeCheckResponse(invalid); err == nil {
 			t.Fatalf("invalid check response was accepted: %s", invalid)

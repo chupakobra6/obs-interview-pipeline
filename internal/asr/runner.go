@@ -16,29 +16,30 @@ import (
 )
 
 const (
-	harvestContractVersion        = 2
-	harvestProfileID              = "trusted-long-form-v2"
+	harvestContractVersion        = 3
+	harvestProfileID              = "trusted-long-form-v3"
 	harvestValidationRuntimeReady = "runtime-ready"
 	harvestValidationCoverage     = "coverage-validated"
 )
 
 type Result struct {
-	ContractVersion  int             `json:"contract_version"`
-	ProfileID        string          `json:"profile_id"`
-	ValidationStatus string          `json:"validation_status"`
-	Text             string          `json:"text"`
-	SpeechDetected   bool            `json:"speech_detected"`
-	Engine           string          `json:"engine"`
-	Backend          json.RawMessage `json:"backend"`
-	FFmpeg           time.Duration   `json:"ffmpeg"`
-	ModelColdStart   time.Duration   `json:"model_cold_start"`
-	SpeechGate       time.Duration   `json:"speech_gate"`
-	LongFormPrep     time.Duration   `json:"long_form_preparation"`
-	LeadingOffset    float64         `json:"leading_speech_offset_seconds,omitempty"`
-	Diagnostics      json.RawMessage `json:"diagnostics,omitempty"`
-	Inference        time.Duration   `json:"inference"`
-	Total            time.Duration   `json:"total"`
-	MetalConfirmed   bool            `json:"metal_confirmed"`
+	ContractVersion   int             `json:"contract_version"`
+	ProfileID         string          `json:"profile_id"`
+	ValidationStatus  string          `json:"validation_status"`
+	Text              string          `json:"text"`
+	SpeechDetected    bool            `json:"speech_detected"`
+	Engine            string          `json:"engine"`
+	Backend           json.RawMessage `json:"backend"`
+	FFmpeg            time.Duration   `json:"ffmpeg"`
+	ModelColdStart    time.Duration   `json:"model_cold_start"`
+	SpeechGate        time.Duration   `json:"speech_gate"`
+	LongFormPrep      time.Duration   `json:"long_form_preparation"`
+	LanguageDetection time.Duration   `json:"language_detection"`
+	LeadingOffset     float64         `json:"leading_speech_offset_seconds,omitempty"`
+	Diagnostics       json.RawMessage `json:"diagnostics,omitempty"`
+	Inference         time.Duration   `json:"inference"`
+	Total             time.Duration   `json:"total"`
+	MetalConfirmed    bool            `json:"metal_confirmed"`
 }
 
 type Transcriber interface {
@@ -50,23 +51,24 @@ type Runner struct {
 }
 
 type harvestResponse struct {
-	ContractVersion  int             `json:"contract_version"`
-	Status           string          `json:"status"`
-	ProfileID        string          `json:"profile_id"`
-	ValidationStatus string          `json:"validation_status"`
-	Text             string          `json:"text"`
-	SpeechDetected   bool            `json:"speech_detected"`
-	MetalConfirmed   bool            `json:"metal_confirmed"`
-	Engine           string          `json:"engine"`
-	Backend          json.RawMessage `json:"backend"`
-	FFmpeg           time.Duration   `json:"ffmpeg"`
-	ModelColdStart   time.Duration   `json:"model_cold_start"`
-	SpeechGate       time.Duration   `json:"speech_gate"`
-	LongFormPrep     time.Duration   `json:"long_form_preparation"`
-	LeadingOffset    float64         `json:"leading_speech_offset_seconds,omitempty"`
-	Diagnostics      json.RawMessage `json:"diagnostics"`
-	Inference        time.Duration   `json:"inference"`
-	Total            time.Duration   `json:"total"`
+	ContractVersion   int             `json:"contract_version"`
+	Status            string          `json:"status"`
+	ProfileID         string          `json:"profile_id"`
+	ValidationStatus  string          `json:"validation_status"`
+	Text              string          `json:"text"`
+	SpeechDetected    bool            `json:"speech_detected"`
+	MetalConfirmed    bool            `json:"metal_confirmed"`
+	Engine            string          `json:"engine"`
+	Backend           json.RawMessage `json:"backend"`
+	FFmpeg            time.Duration   `json:"ffmpeg"`
+	ModelColdStart    time.Duration   `json:"model_cold_start"`
+	SpeechGate        time.Duration   `json:"speech_gate"`
+	LongFormPrep      time.Duration   `json:"long_form_preparation"`
+	LanguageDetection time.Duration   `json:"language_detection"`
+	LeadingOffset     float64         `json:"leading_speech_offset_seconds,omitempty"`
+	Diagnostics       json.RawMessage `json:"diagnostics"`
+	Inference         time.Duration   `json:"inference"`
+	Total             time.Duration   `json:"total"`
 }
 
 func (r Runner) Transcribe(ctx context.Context, inputPath, workDir string) (Result, error) {
@@ -155,22 +157,23 @@ func decodeHarvestResponse(payload []byte, transcriptPath string) (Result, error
 		return Result{}, fmt.Errorf("telegram-harvest transcript file differs from its JSON response")
 	}
 	return Result{
-		ContractVersion:  response.ContractVersion,
-		ProfileID:        response.ProfileID,
-		ValidationStatus: response.ValidationStatus,
-		Text:             response.Text,
-		SpeechDetected:   response.SpeechDetected,
-		Engine:           response.Engine,
-		Backend:          response.Backend,
-		FFmpeg:           response.FFmpeg,
-		ModelColdStart:   response.ModelColdStart,
-		SpeechGate:       response.SpeechGate,
-		LongFormPrep:     response.LongFormPrep,
-		LeadingOffset:    response.LeadingOffset,
-		Diagnostics:      response.Diagnostics,
-		Inference:        response.Inference,
-		Total:            response.Total,
-		MetalConfirmed:   response.MetalConfirmed,
+		ContractVersion:   response.ContractVersion,
+		ProfileID:         response.ProfileID,
+		ValidationStatus:  response.ValidationStatus,
+		Text:              response.Text,
+		SpeechDetected:    response.SpeechDetected,
+		Engine:            response.Engine,
+		Backend:           response.Backend,
+		FFmpeg:            response.FFmpeg,
+		ModelColdStart:    response.ModelColdStart,
+		SpeechGate:        response.SpeechGate,
+		LongFormPrep:      response.LongFormPrep,
+		LanguageDetection: response.LanguageDetection,
+		LeadingOffset:     response.LeadingOffset,
+		Diagnostics:       response.Diagnostics,
+		Inference:         response.Inference,
+		Total:             response.Total,
+		MetalConfirmed:    response.MetalConfirmed,
 	}, nil
 }
 

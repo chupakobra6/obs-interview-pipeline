@@ -4,13 +4,13 @@
 Обновлено: 2026-08-02
 
 ## Активный Шаг
-- id: `STEP-008R`
+- id: `STEP-009R`
 - status: `готово`
-- objective: Гипотеза `max_len=-1` проверена и отклонена как no-op для текущего `token_timestamps=false` path.
-- requirement IDs: `REQ-023`, `VAL-012`
-- owned paths: Telegram Harvest request contract/tests/docs при пройденном gate; Project Loop evidence
-- validation: installed source readback, fresh-process real-file A/B, exact/normalized/segment/runtime comparison
-- done criteria: output exact-identical, отсутствие структурного/performance benefit зафиксировано; production не усложнён; A/B artifacts/processes очищены.
+- objective: Завершить tooling-review, удалить disposable benchmark/E2E state, проверить Project Loop и создать focused commits обоих репозиториев.
+- requirement IDs: `REQ-024`, `REQ-025`, `REQ-026`, `VAL-013`, `VAL-014`
+- owned paths: Project Loop evidence/handoff; Git staging только текущих изменений; временный `/tmp/obs-asr-policy.23ljVp`
+- validation: repo/runtime/process inventory, loopctl validate, git diff/status, installed v3 doctor readback
+- done criteria: временный corpus/results/source/output перемещены в Корзину, Whisper processes отсутствуют, loop validate зелёный, два локальных focused commits созданы.
 
 ## Фокус Ревью
 - Delete gate исключает потерю исходника при любой частичной ошибке.
@@ -28,5 +28,6 @@
 - S007 заменяет OBS-специфичные gate/audio/video требования: основной Telegram Harvest workflow остаётся с Silero, OBS получает явный fast path.
 - S008 заменяет master-only default и автоматический enqueue: решение принимается в prompt для каждой записи.
 - S009 требует качества без потери межчанкового контекста; fixed-chunk v1 заменяется после A/B, а не расширяется без доказательства необходимости.
-- S011 требует contract v2 и bounded tail validation. Статус `coverage-validated` не трактуется как WER/CER; full-file VAD-gap scan и formatter пунктуации остаются отдельными задачами.
+- S011 ввёл contract v2 и bounded tail validation; S013 поднимает текущий transcript contract до v3. Статус `coverage-validated` по-прежнему не трактуется как WER/CER.
 - S012 предлагает `max_len=-1`; source inspection показывает, что character wrap зависит от `token_timestamps=true`, тогда как production отправляет false. Решение принимается только после same-file A/B.
+- S013 запрещает выбирать статический русский prompt только по одному интервью: нужны RU/EN и edge-case evidence, одна адаптивная OBS policy и минимальная публичная поверхность Harvest.
