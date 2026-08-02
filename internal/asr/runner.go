@@ -15,23 +15,30 @@ import (
 	"github.com/chupakobra6/obs-interview-pipeline/internal/config"
 )
 
-const harvestContractVersion = 1
+const (
+	harvestContractVersion        = 2
+	harvestProfileID              = "trusted-long-form-v2"
+	harvestValidationRuntimeReady = "runtime-ready"
+	harvestValidationCoverage     = "coverage-validated"
+)
 
 type Result struct {
-	ContractVersion int             `json:"contract_version"`
-	Text            string          `json:"text"`
-	SpeechDetected  bool            `json:"speech_detected"`
-	Engine          string          `json:"engine"`
-	Backend         json.RawMessage `json:"backend"`
-	FFmpeg          time.Duration   `json:"ffmpeg"`
-	ModelColdStart  time.Duration   `json:"model_cold_start"`
-	SpeechGate      time.Duration   `json:"speech_gate"`
-	LongFormPrep    time.Duration   `json:"long_form_preparation"`
-	LeadingOffset   float64         `json:"leading_speech_offset_seconds,omitempty"`
-	Diagnostics     json.RawMessage `json:"diagnostics,omitempty"`
-	Inference       time.Duration   `json:"inference"`
-	Total           time.Duration   `json:"total"`
-	MetalConfirmed  bool            `json:"metal_confirmed"`
+	ContractVersion  int             `json:"contract_version"`
+	ProfileID        string          `json:"profile_id"`
+	ValidationStatus string          `json:"validation_status"`
+	Text             string          `json:"text"`
+	SpeechDetected   bool            `json:"speech_detected"`
+	Engine           string          `json:"engine"`
+	Backend          json.RawMessage `json:"backend"`
+	FFmpeg           time.Duration   `json:"ffmpeg"`
+	ModelColdStart   time.Duration   `json:"model_cold_start"`
+	SpeechGate       time.Duration   `json:"speech_gate"`
+	LongFormPrep     time.Duration   `json:"long_form_preparation"`
+	LeadingOffset    float64         `json:"leading_speech_offset_seconds,omitempty"`
+	Diagnostics      json.RawMessage `json:"diagnostics,omitempty"`
+	Inference        time.Duration   `json:"inference"`
+	Total            time.Duration   `json:"total"`
+	MetalConfirmed   bool            `json:"metal_confirmed"`
 }
 
 type Transcriber interface {
@@ -43,21 +50,23 @@ type Runner struct {
 }
 
 type harvestResponse struct {
-	ContractVersion int             `json:"contract_version"`
-	Status          string          `json:"status"`
-	Text            string          `json:"text"`
-	SpeechDetected  bool            `json:"speech_detected"`
-	MetalConfirmed  bool            `json:"metal_confirmed"`
-	Engine          string          `json:"engine"`
-	Backend         json.RawMessage `json:"backend"`
-	FFmpeg          time.Duration   `json:"ffmpeg"`
-	ModelColdStart  time.Duration   `json:"model_cold_start"`
-	SpeechGate      time.Duration   `json:"speech_gate"`
-	LongFormPrep    time.Duration   `json:"long_form_preparation"`
-	LeadingOffset   float64         `json:"leading_speech_offset_seconds,omitempty"`
-	Diagnostics     json.RawMessage `json:"diagnostics"`
-	Inference       time.Duration   `json:"inference"`
-	Total           time.Duration   `json:"total"`
+	ContractVersion  int             `json:"contract_version"`
+	Status           string          `json:"status"`
+	ProfileID        string          `json:"profile_id"`
+	ValidationStatus string          `json:"validation_status"`
+	Text             string          `json:"text"`
+	SpeechDetected   bool            `json:"speech_detected"`
+	MetalConfirmed   bool            `json:"metal_confirmed"`
+	Engine           string          `json:"engine"`
+	Backend          json.RawMessage `json:"backend"`
+	FFmpeg           time.Duration   `json:"ffmpeg"`
+	ModelColdStart   time.Duration   `json:"model_cold_start"`
+	SpeechGate       time.Duration   `json:"speech_gate"`
+	LongFormPrep     time.Duration   `json:"long_form_preparation"`
+	LeadingOffset    float64         `json:"leading_speech_offset_seconds,omitempty"`
+	Diagnostics      json.RawMessage `json:"diagnostics"`
+	Inference        time.Duration   `json:"inference"`
+	Total            time.Duration   `json:"total"`
 }
 
 func (r Runner) Transcribe(ctx context.Context, inputPath, workDir string) (Result, error) {
@@ -132,20 +141,11 @@ func decodeHarvestResponse(payload []byte, transcriptPath string) (Result, error
 	if err := json.Unmarshal(payload, &response); err != nil {
 		return Result{}, fmt.Errorf("decode telegram-harvest ASR response: %w: %s", err, compact(payload))
 	}
-	if response.ContractVersion != harvestContractVersion {
-		return Result{}, fmt.Errorf("unsupported telegram-harvest ASR contract %d", response.ContractVersion)
+	if err := validateHarvestContract(response.ContractVersion, response.Status, response.ProfileID, response.ValidationStatus, harvestValidationCoverage, ""); err != nil {
+		return Result{}, err
 	}
-	if response.Status != "ok" {
-		return Result{}, fmt.Errorf("telegram-harvest ASR returned status %q", response.Status)
-	}
-	if strings.TrimSpace(response.Engine) == "" || !json.Valid(response.Backend) {
-		return Result{}, fmt.Errorf("telegram-harvest ASR omitted engine metadata")
-	}
-	if response.SpeechDetected && !response.MetalConfirmed {
-		return Result{}, fmt.Errorf("telegram-harvest ASR did not confirm Metal for detected speech")
-	}
-	if response.SpeechDetected && strings.TrimSpace(response.Text) == "" {
-		return Result{}, fmt.Errorf("telegram-harvest ASR returned no transcript for assumed speech")
+	if strings.TrimSpace(response.Text) == "" {
+		return Result{}, fmt.Errorf("telegram-harvest ASR returned no transcript for trusted long-form input")
 	}
 	transcript, err := os.ReadFile(transcriptPath)
 	if err != nil {
@@ -154,35 +154,56 @@ func decodeHarvestResponse(payload []byte, transcriptPath string) (Result, error
 	if strings.TrimSpace(string(transcript)) != strings.TrimSpace(response.Text) {
 		return Result{}, fmt.Errorf("telegram-harvest transcript file differs from its JSON response")
 	}
-	if response.SpeechDetected {
-		var diagnostics struct {
-			Segments                    int     `json:"segments"`
-			TimestampedSegments         bool    `json:"timestamped_segments"`
-			DecodedAudioDurationSeconds float64 `json:"decoded_audio_duration_seconds"`
-			LastSegmentEndSeconds       float64 `json:"last_segment_end_seconds"`
-		}
-		if err := json.Unmarshal(response.Diagnostics, &diagnostics); err != nil ||
-			diagnostics.Segments == 0 || !diagnostics.TimestampedSegments ||
-			diagnostics.DecodedAudioDurationSeconds <= 0 || diagnostics.LastSegmentEndSeconds <= 0 {
-			return Result{}, fmt.Errorf("telegram-harvest ASR omitted valid long-form diagnostics")
-		}
-	}
 	return Result{
-		ContractVersion: response.ContractVersion,
-		Text:            response.Text,
-		SpeechDetected:  response.SpeechDetected,
-		Engine:          response.Engine,
-		Backend:         response.Backend,
-		FFmpeg:          response.FFmpeg,
-		ModelColdStart:  response.ModelColdStart,
-		SpeechGate:      response.SpeechGate,
-		LongFormPrep:    response.LongFormPrep,
-		LeadingOffset:   response.LeadingOffset,
-		Diagnostics:     response.Diagnostics,
-		Inference:       response.Inference,
-		Total:           response.Total,
-		MetalConfirmed:  response.MetalConfirmed,
+		ContractVersion:  response.ContractVersion,
+		ProfileID:        response.ProfileID,
+		ValidationStatus: response.ValidationStatus,
+		Text:             response.Text,
+		SpeechDetected:   response.SpeechDetected,
+		Engine:           response.Engine,
+		Backend:          response.Backend,
+		FFmpeg:           response.FFmpeg,
+		ModelColdStart:   response.ModelColdStart,
+		SpeechGate:       response.SpeechGate,
+		LongFormPrep:     response.LongFormPrep,
+		LeadingOffset:    response.LeadingOffset,
+		Diagnostics:      response.Diagnostics,
+		Inference:        response.Inference,
+		Total:            response.Total,
+		MetalConfirmed:   response.MetalConfirmed,
 	}, nil
+}
+
+// ValidateRuntimeCheckResponse validates only the public Harvest contract.
+// Model, accelerator, decode and VAD policy are owned and verified by Harvest.
+func ValidateRuntimeCheckResponse(payload []byte) error {
+	var response struct {
+		ContractVersion  int    `json:"contract_version"`
+		Status           string `json:"status"`
+		ProfileID        string `json:"profile_id"`
+		ValidationStatus string `json:"validation_status"`
+	}
+	if err := json.Unmarshal(payload, &response); err != nil {
+		return fmt.Errorf("decode telegram-harvest ASR check: %w: %s", err, compact(payload))
+	}
+	return validateHarvestContract(response.ContractVersion, response.Status, response.ProfileID, response.ValidationStatus, harvestValidationRuntimeReady, " check")
+}
+
+func validateHarvestContract(contractVersion int, status, profileID, validationStatus, expectedValidationStatus, operation string) error {
+	prefix := "telegram-harvest ASR" + operation
+	if contractVersion != harvestContractVersion {
+		return fmt.Errorf("unsupported %s contract %d", prefix, contractVersion)
+	}
+	if status != "ok" {
+		return fmt.Errorf("%s returned status %q", prefix, status)
+	}
+	if profileID != harvestProfileID {
+		return fmt.Errorf("%s returned profile %q, want %q", prefix, profileID, harvestProfileID)
+	}
+	if validationStatus != expectedValidationStatus {
+		return fmt.Errorf("%s returned validation status %q, want %q", prefix, validationStatus, expectedValidationStatus)
+	}
+	return nil
 }
 
 func compact(value []byte) string {

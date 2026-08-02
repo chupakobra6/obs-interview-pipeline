@@ -33,6 +33,25 @@ ID источника: `S009`
 - [x] reviewer проверил
 - [x] handoff обновлен
 
+### Contract v2 и доказуемое покрытие хвоста long-form
+
+ID источника: `S011`
+
+Исходный ввод сохранён без нормализации в `.project-loop/intake/raw/long-form-contract-validation-review.md`. Пользователь просит проверить рекомендации по контракту и безопасности и реализовать справедливые правки без потери качества и производительности.
+
+Нормализация:
+- [x] оставить native timestamped one-request long-form и не возвращать fixed chunks/fallback;
+- [x] поднять межрепозиторный контракт до v2 и добавить стабильные `profile_id`/`validation_status`;
+- [x] Harvest остаётся источником истины для модели, Metal, decode, Silero и result validation; OBS проверяет публичный контракт и целостность transcript artifact;
+- [x] bounded reverse VAD находит последнюю речь, а Harvest сравнивает её с последним ASR timestamp;
+- [x] использовать честный статус `coverage-validated`, потому что проверка не измеряет WER/CER;
+- [x] обычные Telegram/file flows, post-filter и один ASR request не менять;
+- [x] подтвердить изменения тестами и current-head реальным прогоном.
+
+Осознанно не включено в этот шаг:
+- full-file VAD-gap comparison: опционально, повышает стоимость и сложность, но без эталона не доказывает лексическую точность;
+- отдельный пунктуационный formatter: это независимая quality-фича, исходная расшифровка должна оставаться канонической.
+
 ### Канонический ASR Telegram Harvest и кликабельное уведомление
 
 ID источника: `S003`

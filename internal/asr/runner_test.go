@@ -17,14 +17,15 @@ func TestDecodeHarvestResponseValidatesContractAndTranscript(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload, err := json.Marshal(harvestResponse{
-		ContractVersion: harvestContractVersion,
-		Status:          "ok",
-		Text:            "Проверка общей расшифровки.",
-		SpeechDetected:  true,
-		MetalConfirmed:  true,
-		Engine:          "whispercpp",
-		Backend:         json.RawMessage(`{"backend":"whispercpp","accelerator":"metal"}`),
-		Diagnostics:     validLongFormDiagnostics(),
+		ContractVersion:  harvestContractVersion,
+		Status:           "ok",
+		ProfileID:        harvestProfileID,
+		ValidationStatus: harvestValidationCoverage,
+		Text:             "Проверка общей расшифровки.",
+		SpeechDetected:   true,
+		Engine:           "whispercpp",
+		Backend:          json.RawMessage(`{"owned_by":"telegram-harvest"}`),
+		Diagnostics:      json.RawMessage(`{"opaque":true}`),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +34,8 @@ func TestDecodeHarvestResponseValidatesContractAndTranscript(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ContractVersion != harvestContractVersion || !result.MetalConfirmed || result.Engine != "whispercpp" || !json.Valid(result.Diagnostics) {
+	if result.ContractVersion != harvestContractVersion || result.ProfileID != harvestProfileID ||
+		result.ValidationStatus != harvestValidationCoverage || result.Engine != "whispercpp" || !json.Valid(result.Diagnostics) {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 }
@@ -61,27 +63,55 @@ func TestTranscribeArgsSelectTrustedOBSProfile(t *testing.T) {
 	}
 }
 
-func TestDecodeHarvestResponseRejectsUnconfirmedMetalAndMismatch(t *testing.T) {
+func TestDecodeHarvestResponseRejectsWrongPublicContract(t *testing.T) {
 	dir := t.TempDir()
 	transcriptPath := filepath.Join(dir, "transcript.txt")
 	if err := os.WriteFile(transcriptPath, []byte("file text"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	base := harvestResponse{
-		ContractVersion: harvestContractVersion,
-		Status:          "ok",
-		Text:            "file text",
-		SpeechDetected:  true,
-		Engine:          "whispercpp",
-		Backend:         json.RawMessage(`{"backend":"whispercpp"}`),
+		ContractVersion:  harvestContractVersion,
+		Status:           "ok",
+		ProfileID:        harvestProfileID,
+		ValidationStatus: harvestValidationCoverage,
+		Text:             "file text",
 	}
-	payload, _ := json.Marshal(base)
-	if _, err := decodeHarvestResponse(payload, transcriptPath); err == nil || !strings.Contains(err.Error(), "confirm Metal") {
-		t.Fatalf("unexpected Metal error: %v", err)
+	tests := []struct {
+		name   string
+		mutate func(*harvestResponse)
+		want   string
+	}{
+		{name: "version", mutate: func(value *harvestResponse) { value.ContractVersion-- }, want: "contract"},
+		{name: "status", mutate: func(value *harvestResponse) { value.Status = "error" }, want: "status"},
+		{name: "profile", mutate: func(value *harvestResponse) { value.ProfileID = "short-message-v1" }, want: "profile"},
+		{name: "validation", mutate: func(value *harvestResponse) { value.ValidationStatus = "transcribed" }, want: "validation status"},
 	}
-	base.MetalConfirmed = true
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value := base
+			test.mutate(&value)
+			payload, _ := json.Marshal(value)
+			if _, err := decodeHarvestResponse(payload, transcriptPath); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestDecodeHarvestResponseRejectsTranscriptMismatch(t *testing.T) {
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "transcript.txt")
+	if err := os.WriteFile(transcriptPath, []byte("file text"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := harvestResponse{
+		ContractVersion:  harvestContractVersion,
+		Status:           "ok",
+		ProfileID:        harvestProfileID,
+		ValidationStatus: harvestValidationCoverage,
+	}
 	base.Text = "JSON text"
-	payload, _ = json.Marshal(base)
+	payload, _ := json.Marshal(base)
 	if _, err := decodeHarvestResponse(payload, transcriptPath); err == nil || !strings.Contains(err.Error(), "differs") {
 		t.Fatalf("unexpected mismatch error: %v", err)
 	}
@@ -94,12 +124,10 @@ func TestDecodeHarvestResponseRejectsEmptyAssumedSpeech(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload, err := json.Marshal(harvestResponse{
-		ContractVersion: harvestContractVersion,
-		Status:          "ok",
-		SpeechDetected:  true,
-		MetalConfirmed:  true,
-		Engine:          "whispercpp",
-		Backend:         json.RawMessage(`{"backend":"whispercpp","accelerator":"metal"}`),
+		ContractVersion:  harvestContractVersion,
+		Status:           "ok",
+		ProfileID:        harvestProfileID,
+		ValidationStatus: harvestValidationCoverage,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -109,29 +137,18 @@ func TestDecodeHarvestResponseRejectsEmptyAssumedSpeech(t *testing.T) {
 	}
 }
 
-func TestDecodeHarvestResponseRejectsMissingLongFormDiagnostics(t *testing.T) {
-	dir := t.TempDir()
-	transcriptPath := filepath.Join(dir, "transcript.txt")
-	if err := os.WriteFile(transcriptPath, []byte("Речь."), 0o600); err != nil {
+func TestValidateRuntimeCheckResponseUsesPublicContract(t *testing.T) {
+	payload := []byte(`{"contract_version":2,"status":"ok","profile_id":"trusted-long-form-v2","validation_status":"runtime-ready","backend":{"arbitrary":true}}`)
+	if err := ValidateRuntimeCheckResponse(payload); err != nil {
 		t.Fatal(err)
 	}
-	payload, err := json.Marshal(harvestResponse{
-		ContractVersion: harvestContractVersion,
-		Status:          "ok",
-		Text:            "Речь.",
-		SpeechDetected:  true,
-		MetalConfirmed:  true,
-		Engine:          "whispercpp",
-		Backend:         json.RawMessage(`{"backend":"whispercpp","accelerator":"metal"}`),
-	})
-	if err != nil {
-		t.Fatal(err)
+	for _, invalid := range [][]byte{
+		[]byte(`{"contract_version":1,"status":"ok","profile_id":"trusted-long-form-v2","validation_status":"runtime-ready"}`),
+		[]byte(`{"contract_version":2,"status":"ok","profile_id":"short-message-v1","validation_status":"runtime-ready"}`),
+		[]byte(`{"contract_version":2,"status":"ok","profile_id":"trusted-long-form-v2","validation_status":"coverage-validated"}`),
+	} {
+		if err := ValidateRuntimeCheckResponse(invalid); err == nil {
+			t.Fatalf("invalid check response was accepted: %s", invalid)
+		}
 	}
-	if _, err := decodeHarvestResponse(payload, transcriptPath); err == nil || !strings.Contains(err.Error(), "long-form diagnostics") {
-		t.Fatalf("unexpected diagnostics error: %v", err)
-	}
-}
-
-func validLongFormDiagnostics() json.RawMessage {
-	return json.RawMessage(`{"segments":2,"timestamped_segments":true,"decoded_audio_duration_seconds":12.5,"last_segment_end_seconds":12.1}`)
 }

@@ -4,13 +4,13 @@
 Обновлено: 2026-08-02
 
 ## Активный Шаг
-- id: `STEP-006R`
+- id: `STEP-007R`
 - status: `готово`
-- objective: Native timestamped long-form установлен, A/B и финальный review завершены; остается focused version-control closure.
-- requirement IDs: `REQ-017..REQ-019`, `VAL-010`
-- owned paths: Telegram Harvest long-form API/runtime/tests/docs; OBS descriptor/doctor/docs; Project Loop artifacts
-- validation: full/race checks, installed doctor, real-file A/B, Git/process/artifact inventory
-- done criteria: оба focused commit созданы; installed current head проверен; disposable benchmark artifacts отсутствуют.
+- objective: Contract v2 и trailing coverage установлены, проверены на реальном интервью и прошли финальный tooling-review.
+- requirement IDs: `REQ-020..REQ-022`, `VAL-011`
+- owned paths: Telegram Harvest long-form preparation/validator/CLI/tests/docs; OBS ASR consumer/doctor/tests/docs; Project Loop artifacts
+- validation: focused/full/race checks, installed doctor, real-file current-head rerun, Git/process/artifact inventory
+- done criteria: оба репозитория согласованы по v2; Harvest отклоняет непокрытый хвост; OBS не дублирует внутренние настройки; real/current installed state и cleanup подтверждены.
 
 ## Фокус Ревью
 - Delete gate исключает потерю исходника при любой частичной ошибке.
@@ -28,3 +28,4 @@
 - S007 заменяет OBS-специфичные gate/audio/video требования: основной Telegram Harvest workflow остаётся с Silero, OBS получает явный fast path.
 - S008 заменяет master-only default и автоматический enqueue: решение принимается в prompt для каждой записи.
 - S009 требует качества без потери межчанкового контекста; fixed-chunk v1 заменяется после A/B, а не расширяется без доказательства необходимости.
+- S011 требует contract v2 и bounded tail validation. Статус `coverage-validated` не трактуется как WER/CER; full-file VAD-gap scan и formatter пунктуации остаются отдельными задачами.

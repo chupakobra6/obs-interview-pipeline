@@ -9,8 +9,16 @@
 
 ## Текущий Шаг
 
-- active step: `STEP-006R`
+- active step: `STEP-007R`
 - status: `готово`
+
+## Новая Дельта S011
+
+- Native timestamped long-form остаётся основным и единственным OBS decode path.
+- Межрепозиторный контракт поднят до v2 с явными profile/status вместо дублирования Harvest internals в OBS.
+- Bounded tail VAD проверяет достижение последней речи; статус `coverage-validated` описывает именно эту гарантию и не выдаётся за WER/CER.
+- Реальный предварительный tail probe занял 0,64 с и нашёл конец речи на 965,41 с source / 786,92 с trimmed WAV; предыдущий ASR last segment 787,40 с покрывает границу.
+- Full-file VAD gap scan и отдельный punctuation formatter не входят в текущий шаг.
 
 ## Новая Дельта S009
 
@@ -38,6 +46,10 @@
 - Disposable integration подтверждает оба audio mode: preserve оставляет 3 streams, merge создаёт 1 stream; failure/delete-retry/keep-source tests зелёные.
 - Tooling-review удалил дублированную установку двух Swift apps в пользу одного installer helper; repo-polish синхронизировал README, help, doctor и current-head evidence.
 - Test sources, result, job и диагностические WAV/TXT перемещены в именованный каталог Корзины; test notifier process завершён.
+- Contract v2 добавляет `short-message-v1`, `trusted-speech-v1`, `trusted-long-form-v2` и точные validation statuses; OBS принимает только long-form coverage status, а doctor — runtime-ready.
+- Harvest bounded-окнами находит обе границы речи; parser проверяет объявленное число и timestamps VAD, timestamped validator отклоняет хвост дальше двухсекундного допуска.
+- Current-head real rerun сохранил 1455 слов и 344 segments; VAD end 786.91 s, ASR end 787.40 s, coverage gap 0, preparation 1.47 s, wall 47.44 s.
+- Tooling-review схлопнул повторную OBS-проверку публичного контракта в один helper; временный benchmark transcript/result удаляется после фиксации evidence.
 
 ## Измененные Области
 
@@ -53,6 +65,7 @@
 - Реальная повторная ASR-диагностика и три A/B-варианта описаны выше; terminal diagnostics зафиксировали удаление трёх повторов `спасибо`.
 - `make check` и `go test -race ./...` зелёные в обоих репозиториях.
 - Финальный `make install && make doctor`, `plutil -lint`, обе `codesign --verify` и Project Loop validate зелёные.
+- Contract v2 negative tests, trailing tolerance pass/fail и malformed VAD count tests зелёные; current-head real response вернул `coverage-validated`.
 
 ## Агенты
 
@@ -70,6 +83,7 @@
 - Обычные Telegram audio/video продолжают использовать whole-file Silero gate и `no_timestamps=true`. Native timestamped long-form доступен только явному trusted caller и не меняет Telegram workflow.
 - Segment timestamps нужны декодеру для полноты; у turbo-модели текст менее пунктуирован, чем первые no-timestamp окна, но контрольный no-timestamp one-shot потерял 80% разговора и ушёл в repetition loop.
 - Старый реальный manifest и оба исторических transcript остаются доказательством предыдущих прогонов; benchmark-копия не публикуется в каталог собеседования.
+- `coverage-validated` не доказывает WER/CER и не исключает внутреннюю лексическую ошибку; он доказывает structural timestamps и покрытие последней VAD-речи. Full-file gap scan сознательно не добавлен из-за стоимости и слабой дополнительной гарантии без эталона.
 
 ## Следующее Действие
 
