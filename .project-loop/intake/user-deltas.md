@@ -298,7 +298,7 @@ ID источника: `S015`
 - [x] синхронно обновить OBS consumer и документацию без compatibility alias;
 - [x] проверить real Telegram corpus, leading-silence regression, реальное интервью и full/race flow;
 - [x] переустановить OBS binary из чистого HEAD, выполнить integrated flow и проверить installed provenance;
-- [ ] запушить оба репозитория и дождаться post-push CI.
+- [x] запушить оба репозитория и дождаться post-push CI.
 
 Принятая граница:
 - mixed-language внутри одной записи не входит в этот шаг; единый probe выбирает доминирующий режим записи.

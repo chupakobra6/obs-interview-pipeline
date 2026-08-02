@@ -10,7 +10,7 @@
 ## Текущий Шаг
 
 - active step: `STEP-011R`
-- status: `в работе`
+- status: `готово`
 - requirements: `REQ-028..REQ-030`, `VAL-017`
 
 ## Итог Реализации
@@ -47,6 +47,7 @@
 - Clean installed production E2E: 15 s leading silence → offset 14,49 s, punctuated RU transcript, `coverage-validated`, gap 0, Metal true; HEVC 1512×982@30 + AAC readback зелёный.
 - Installed `go version -m` показал `vcs.modified=false`; после closure commit установка повторяется из финального чистого HEAD.
 - Disposable E2E source/result перемещены в Корзину; `.processing-*` и фоновые Whisper/processor процессы отсутствуют.
+- Post-push CI implementation commits зелёный: Harvest run `30741633468`, OBS run `30741633525`; final closure commit повторяет те же repository gates.
 - Project Loop validate — зелёный.
 - GitHub CI: OBS `f1c6605` и Harvest `b2fbd80` — зелёные; финальный docs/loop closure проходит отдельный post-push CI gate.
 - Временные benchmark/E2E artifacts отсутствуют; тесты используют `t.TempDir()`.
@@ -58,7 +59,7 @@
 
 ## Следующее Действие
 
-- Запушить оба репозитория, дождаться CI и закрыть STEP-011R; mixed-language routing внутри одной записи остаётся явной отложенной границей.
+- Использовать OBS и Telegram Harvest как обычно; mixed-language routing внутри одной записи остаётся явной отложенной границей.
 
 ## Источники Правды
 

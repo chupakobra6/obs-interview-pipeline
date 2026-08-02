@@ -5,7 +5,7 @@
 
 ## Активный Шаг
 - id: `STEP-011R`
-- status: `в работе`
+- status: `готово`
 - objective: Закрыть поставку единого adaptive ASR: чистая установка, integrated OBS→Harvest проверка, cleanup, push и CI.
 - requirement IDs: `REQ-028`, `REQ-029`, `REQ-030`, `CON-006`, `VAL-017`
 - owned paths: Project Loop closure state; installed OBS/Harvest runtime; disposable E2E artifacts; GitHub CI
