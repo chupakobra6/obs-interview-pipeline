@@ -4,13 +4,13 @@
 Обновлено: 2026-08-02
 
 ## Активный Шаг
-- id: `STEP-007R`
+- id: `STEP-008R`
 - status: `готово`
-- objective: Contract v2 и trailing coverage установлены, проверены на реальном интервью и прошли финальный tooling-review.
-- requirement IDs: `REQ-020..REQ-022`, `VAL-011`
-- owned paths: Telegram Harvest long-form preparation/validator/CLI/tests/docs; OBS ASR consumer/doctor/tests/docs; Project Loop artifacts
-- validation: focused/full/race checks, installed doctor, real-file current-head rerun, Git/process/artifact inventory
-- done criteria: оба репозитория согласованы по v2; Harvest отклоняет непокрытый хвост; OBS не дублирует внутренние настройки; real/current installed state и cleanup подтверждены.
+- objective: Гипотеза `max_len=-1` проверена и отклонена как no-op для текущего `token_timestamps=false` path.
+- requirement IDs: `REQ-023`, `VAL-012`
+- owned paths: Telegram Harvest request contract/tests/docs при пройденном gate; Project Loop evidence
+- validation: installed source readback, fresh-process real-file A/B, exact/normalized/segment/runtime comparison
+- done criteria: output exact-identical, отсутствие структурного/performance benefit зафиксировано; production не усложнён; A/B artifacts/processes очищены.
 
 ## Фокус Ревью
 - Delete gate исключает потерю исходника при любой частичной ошибке.
@@ -29,3 +29,4 @@
 - S008 заменяет master-only default и автоматический enqueue: решение принимается в prompt для каждой записи.
 - S009 требует качества без потери межчанкового контекста; fixed-chunk v1 заменяется после A/B, а не расширяется без доказательства необходимости.
 - S011 требует contract v2 и bounded tail validation. Статус `coverage-validated` не трактуется как WER/CER; full-file VAD-gap scan и formatter пунктуации остаются отдельными задачами.
+- S012 предлагает `max_len=-1`; source inspection показывает, что character wrap зависит от `token_timestamps=true`, тогда как production отправляет false. Решение принимается только после same-file A/B.

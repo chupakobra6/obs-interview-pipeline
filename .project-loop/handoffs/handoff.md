@@ -9,8 +9,17 @@
 
 ## Текущий Шаг
 
-- active step: `STEP-007R`
+- active step: `STEP-008R`
 - status: `готово`
+
+## Новая Дельта S012
+
+- Предложение явно отправлять `max_len=-1` проверено и отклонено как no-op для текущего режима.
+- Installed server действительно заменяет `max_len=0` на 60, но installed core вызывает character wrapping только при `token_timestamps=true`; Harvest long-form отправляет `token_timestamps=false`.
+- Два fresh-process прогона на вариант дали exact-identical text/tokens/344 segments/timestamps; maximum segment уже 190 chars, поэтому 60-char wrap не активен.
+- Median runtime 48.48 s (`0`) и 50.86 s (`-1`); ни структурного, ни performance improvement нет. Production-код и contract/profile не менялись.
+- Первый same-server probe показал межзапросную вариативность и был исключён как несоответствующий one-shot OBS production; итоговый A/B использовал свежий процесс на каждый запрос.
+- Все A/B JSON/log/time/WAV и тестовые whisper-server процессы удалены после фиксации агрегированных evidence.
 
 ## Новая Дельта S011
 

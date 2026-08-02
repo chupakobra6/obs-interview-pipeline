@@ -26,6 +26,7 @@
 | S009 | user delta | 2026-08-02 | `.project-loop/intake/user-deltas.md` | принято | Заменить фиксированные 120-секундные чанки качественным long-form алгоритмом без искусственных границ; проверить нативный timestamped decode и реальный transcript. |
 | S010 | primary research + experiment | 2026-08-02 | `ggml-org/whisper.cpp@v1.9.1/examples/server/server.cpp`, `openai/whisper/whisper/transcribe.py`, real-file A/B | принято | Server поддерживает request-level timestamps; нативный decoder переносит контекст и продвигается по timestamp-токенам. На trimmed interview timestamps дали полный текст, `no_timestamps` зациклился после 290 слов. |
 | S011 | user review + local verification | 2026-08-02 | `.project-loop/intake/raw/long-form-contract-validation-review.md`, current code, real-file tail VAD benchmark | принято с уточнением | Справедливы contract v2 и bounded-проверка последней речи. Статус называется `coverage-validated`: он доказывает структуру и покрытие хвоста, но не WER/CER и не каждое внутреннее слово. Tail VAD занял 0,64 с. |
+| S012 | user delta + primary local source | 2026-08-02 | `.project-loop/intake/user-deltas.md`, installed `whisper.cpp@v1.9.1` server/core, real-file A/B | принято с выводом no-op | Server преобразует default 0 в 60, но core wrapping выполняется только при `token_timestamps=true`; production отправляет false. Fresh-process A/B дал exact-identical text/tokens/segments/timestamps, поэтому production-настройка отклонена как не дающая улучшения. |
 
 ## Конфликты
 | Источники | Решение | Дата |
