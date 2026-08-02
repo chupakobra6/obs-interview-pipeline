@@ -262,7 +262,7 @@ func doctor(ctx context.Context, cfg config.Config, stdout io.Writer) error {
 	buildOutput, buildErr := exec.CommandContext(ctx, cfg.MakeCommand, "-s", "-C", cfg.TelegramHarvestRoot, "build").CombinedOutput()
 	checks = append(checks, check{Name: "telegram-harvest-build", OK: buildErr == nil, Detail: oneLineDetail(string(buildOutput))})
 	if buildErr == nil {
-		asrCheck := exec.CommandContext(ctx, cfg.TelegramHarvestCommand, "--profile", "main", "transcribe-file", "--check", "--trusted-long-form")
+		asrCheck := exec.CommandContext(ctx, cfg.TelegramHarvestCommand, "--profile", "main", "transcribe-file", "--check")
 		asrCheck.Dir = cfg.TelegramHarvestRoot
 		asrOutput, asrErr := asrCheck.CombinedOutput()
 		contractErr := asr.ValidateRuntimeCheckResponse(asrOutput)

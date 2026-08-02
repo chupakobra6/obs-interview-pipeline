@@ -8,7 +8,7 @@
 
 1. Lua-hook получает от OBS точный путь последней завершённой записи и неблокирующе открывает `OBS Interview Prompt.app`.
 2. Кнопка «Оставить без обработки» ничего не меняет. Кнопка «Сжать и расшифровать» кладёт в очередь путь и выбранные для этой записи параметры; macOS `LaunchAgent` запускает один worker.
-3. Worker параллельно вызывает канонический `telegram-harvest transcribe-file --trusted-long-form` и обрабатывает медиаконтейнер.
+3. Worker параллельно вызывает канонический адаптивный `telegram-harvest transcribe-file` и обрабатывает медиаконтейнер.
 4. Готовый source HEVC `1512x982@30` копируется без повторного video encode; для старого или иного входа включается VideoToolbox transcode и только необходимые `scale`/`fps` filters.
 5. По умолчанию все source audio tracks сохраняются раздельно и кодируются в AAC с target 96 Кбит/с. Галочка merge сводит их в одну AAC-дорожку. Проверка подтверждает ожидаемое число streams, codec/bitrate, разрешение, fps, длительность и уменьшение размера.
 6. Готовая тройка файлов публикуется одним переименованием каталога. Исходник удаляется только при выбранной галочке и только после этой публикации и повторной проверки.
@@ -32,7 +32,7 @@
 - Source: H.265/HEVC через Apple VideoToolbox + три выбранные в OBS AAC-дорожки.
 - Final: тот же video stream без повторной потери качества, если source уже HEVC `1512x982@30`; по умолчанию те же три дорожки в AAC с target 96 Кбит/с либо одна сведённая дорожка при выборе merge.
 - Video quality: OBS использует CRF quality `55`; fallback-transcode старого входа использует тот же `-q:v 55`. В шкале VideoToolbox большее число означает выше качество и больший ожидаемый bitrate/размер.
-- ASR: production-вход Telegram Harvest с `--trusted-long-form`. Канонический Silero bounded-окнами находит первую и последнюю речь и сохраняет секундный lead-in. Короткий Whisper probe определяет язык; русский получает проверенный punctuation seed без carry, английский и остальные языки декодируются без prompt. Затем один timestamped long-form запрос ведёт окна и контекст до конца записи. Harvest проверяет duration/timestamps и достижение последней речи с двухсекундным допуском, после чего возвращает contract v3: `profile_id=trusted-long-form-v3`, `validation_status=coverage-validated`. Искусственных чанков и текстовой склейки нет. `large-v3-turbo-q5_0`, Metal, language/prompt policy, Silero и post-filter остаются единым профилем Harvest; OBS доверяет публичному contract/profile/status и не повторяет internals. Обычный Telegram workflow продолжает использовать русский short profile и whole-file Silero gate.
+- ASR: единый production-вход Telegram Harvest сам выбирает short либо protected long-form по длительности и leading silence. Для интервью bounded Silero находит первую и последнюю речь, сохраняет секундный lead-in, физический 15-секундный probe выбирает language policy, после чего один timestamped request ведёт контекст до конца. Harvest проверяет duration/timestamps, хвост и extreme repetition и возвращает contract v4: `profile_id=adaptive-media-v1`, `validation_status=coverage-validated`. OBS не передаёт ASR-настройки и не содержит отдельного профиля.
 - Уведомление: клик по success notification открывает Finder сразу в каталоге готового собеседования.
 
 ## Установка и проверка

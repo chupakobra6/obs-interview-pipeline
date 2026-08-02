@@ -4,21 +4,20 @@
 Обновлено: 2026-08-02
 
 ## Активный Шаг
-- id: `STEP-010R`
-- status: `готово`
-- objective: Завершить опубликованные Telegram Harvest и OBS pipeline через tooling-review, repo-polish и выборочный session-learnings pass.
-- requirement IDs: `REQ-027`, `VAL-015`
-- owned paths: безопасные code/test/docs/DX findings в обоих репозиториях; Project Loop source/checklist/plan/handoff; ближайшие устойчивые repo-specific правила при доказанной необходимости
-- validation: help/README/CI review, focused/full/race tests, cross-repo contract check, installed doctor, Project Loop validate, Git/runtime/process inventory и GitHub CI после push
-- done criteria: review findings устранены либо явно отклонены с причиной; постоянные learnings не дублируют существующие правила; оба репозитория проверены, закоммичены, запушены и синхронны с upstream.
+- id: `STEP-011R`
+- status: `в работе`
+- objective: Закрыть поставку единого adaptive ASR: чистая установка, integrated OBS→Harvest проверка, cleanup, push и CI.
+- requirement IDs: `REQ-028`, `REQ-029`, `REQ-030`, `CON-006`, `VAL-017`
+- owned paths: Project Loop closure state; installed OBS/Harvest runtime; disposable E2E artifacts; GitHub CI
+- validation: clean current-head install, doctor contract v4, real adaptive OBS→Harvest E2E, process/temp inventory, Project Loop validate и post-push CI
+- done criteria: установленный binary имеет чистый final provenance; contract v4/profile adaptive-media-v1 активен; временных артефактов/процессов нет; оба origin и CI зелёные.
 
 ## Фокус Ревью
-- Manifest/delete retry проверяет identity source и точное соответствие transcript/output до `unlink`.
-- Public help/README называют только два актуальных ASR profile и один Harvest source of truth.
-- GitHub CI выполняет check/audit/race в bounded runner; OBS CI остаётся macOS-native.
-- Session learnings живут в behavior tests и одном коротком Harvest rule, без отдельного task-shaped документа.
+- Один public profile не означает один и тот же decode для любой длительности: adaptive router обязан сохранять short quality/performance и включать long protection только по проверяемым признакам.
+- Language probe физически ограничивает вход, не только request metadata.
+- Repetition guard должен ловить только явные циклы и не повреждать допустимые повторения речи.
+- Telegram и OBS используют один descriptor/cache contract без caller-owned ASR internals.
 
 ## Примечания
 - `coverage-validated` доказывает timestamps и покрытие хвоста, но не WER/CER.
-- Public repository остаётся без LICENSE: выбор лицензии требует отдельного решения владельца и не подменён polish-pass предположением.
-- Subagents не использовались; review выполнен отдельным scenario-first self-review проходом.
+- Mixed-language внутри одной записи явно отложен по решению пользователя.

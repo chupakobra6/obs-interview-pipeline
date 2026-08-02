@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	harvestContractVersion        = 3
-	harvestProfileID              = "trusted-long-form-v3"
+	harvestContractVersion        = 4
+	harvestProfileID              = "adaptive-media-v1"
 	harvestValidationRuntimeReady = "runtime-ready"
+	harvestValidationTranscribed  = "transcribed"
 	harvestValidationCoverage     = "coverage-validated"
 )
 
@@ -104,7 +105,6 @@ func transcribeArgs(inputPath, transcriptPath string) []string {
 	return []string{
 		"--profile", "main",
 		"transcribe-file",
-		"--trusted-long-form",
 		"--input", inputPath,
 		"--output", transcriptPath,
 	}
@@ -143,11 +143,18 @@ func decodeHarvestResponse(payload []byte, transcriptPath string) (Result, error
 	if err := json.Unmarshal(payload, &response); err != nil {
 		return Result{}, fmt.Errorf("decode telegram-harvest ASR response: %w: %s", err, compact(payload))
 	}
-	if err := validateHarvestContract(response.ContractVersion, response.Status, response.ProfileID, response.ValidationStatus, harvestValidationCoverage, ""); err != nil {
+	if err := validateHarvestContract(
+		response.ContractVersion,
+		response.Status,
+		response.ProfileID,
+		response.ValidationStatus,
+		[]string{harvestValidationTranscribed, harvestValidationCoverage},
+		"",
+	); err != nil {
 		return Result{}, err
 	}
 	if strings.TrimSpace(response.Text) == "" {
-		return Result{}, fmt.Errorf("telegram-harvest ASR returned no transcript for trusted long-form input")
+		return Result{}, fmt.Errorf("telegram-harvest ASR returned no transcript for interview input")
 	}
 	transcript, err := os.ReadFile(transcriptPath)
 	if err != nil {
@@ -189,10 +196,10 @@ func ValidateRuntimeCheckResponse(payload []byte) error {
 	if err := json.Unmarshal(payload, &response); err != nil {
 		return fmt.Errorf("decode telegram-harvest ASR check: %w: %s", err, compact(payload))
 	}
-	return validateHarvestContract(response.ContractVersion, response.Status, response.ProfileID, response.ValidationStatus, harvestValidationRuntimeReady, " check")
+	return validateHarvestContract(response.ContractVersion, response.Status, response.ProfileID, response.ValidationStatus, []string{harvestValidationRuntimeReady}, " check")
 }
 
-func validateHarvestContract(contractVersion int, status, profileID, validationStatus, expectedValidationStatus, operation string) error {
+func validateHarvestContract(contractVersion int, status, profileID, validationStatus string, expectedValidationStatuses []string, operation string) error {
 	prefix := "telegram-harvest ASR" + operation
 	if contractVersion != harvestContractVersion {
 		return fmt.Errorf("unsupported %s contract %d", prefix, contractVersion)
@@ -203,10 +210,12 @@ func validateHarvestContract(contractVersion int, status, profileID, validationS
 	if profileID != harvestProfileID {
 		return fmt.Errorf("%s returned profile %q, want %q", prefix, profileID, harvestProfileID)
 	}
-	if validationStatus != expectedValidationStatus {
-		return fmt.Errorf("%s returned validation status %q, want %q", prefix, validationStatus, expectedValidationStatus)
+	for _, expected := range expectedValidationStatuses {
+		if validationStatus == expected {
+			return nil
+		}
 	}
-	return nil
+	return fmt.Errorf("%s returned validation status %q, want one of %q", prefix, validationStatus, expectedValidationStatuses)
 }
 
 func compact(value []byte) string {

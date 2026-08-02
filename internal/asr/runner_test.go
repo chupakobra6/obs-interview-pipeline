@@ -55,13 +55,16 @@ func TestToolEnvironmentProvidesHomebrewToLaunchAgentChild(t *testing.T) {
 	}
 }
 
-func TestTranscribeArgsSelectTrustedOBSProfile(t *testing.T) {
+func TestTranscribeArgsUseUnifiedAdaptiveProfile(t *testing.T) {
 	args := transcribeArgs("/tmp/interview.mp4", "/tmp/transcript.txt")
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"--profile main", "transcribe-file", "--trusted-long-form", "--input /tmp/interview.mp4", "--output /tmp/transcript.txt"} {
+	for _, want := range []string{"--profile main", "transcribe-file", "--input /tmp/interview.mp4", "--output /tmp/transcript.txt"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("transcribe args %q missing %q", joined, want)
 		}
+	}
+	if strings.Contains(joined, "--trusted-long-form") {
+		t.Fatalf("transcribe args retain removed caller-owned ASR mode: %q", joined)
 	}
 }
 
@@ -85,8 +88,8 @@ func TestDecodeHarvestResponseRejectsWrongPublicContract(t *testing.T) {
 	}{
 		{name: "version", mutate: func(value *harvestResponse) { value.ContractVersion-- }, want: "contract"},
 		{name: "status", mutate: func(value *harvestResponse) { value.Status = "error" }, want: "status"},
-		{name: "profile", mutate: func(value *harvestResponse) { value.ProfileID = "short-message-v1" }, want: "profile"},
-		{name: "validation", mutate: func(value *harvestResponse) { value.ValidationStatus = "transcribed" }, want: "validation status"},
+		{name: "profile", mutate: func(value *harvestResponse) { value.ProfileID = "legacy-profile" }, want: "profile"},
+		{name: "validation", mutate: func(value *harvestResponse) { value.ValidationStatus = "no-speech" }, want: "validation status"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -97,6 +100,28 @@ func TestDecodeHarvestResponseRejectsWrongPublicContract(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestDecodeHarvestResponseAcceptsAdaptiveShortResult(t *testing.T) {
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "transcript.txt")
+	if err := os.WriteFile(transcriptPath, []byte("Короткая запись."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(harvestResponse{
+		ContractVersion: harvestContractVersion, Status: "ok", ProfileID: harvestProfileID,
+		ValidationStatus: harvestValidationTranscribed, Text: "Короткая запись.", SpeechDetected: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := decodeHarvestResponse(payload, transcriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ValidationStatus != harvestValidationTranscribed {
+		t.Fatalf("validation status = %q", result.ValidationStatus)
 	}
 }
 
@@ -119,7 +144,7 @@ func TestDecodeHarvestResponseRejectsTranscriptMismatch(t *testing.T) {
 	}
 }
 
-func TestDecodeHarvestResponseRejectsEmptyTrustedLongForm(t *testing.T) {
+func TestDecodeHarvestResponseRejectsEmptyInterviewTranscript(t *testing.T) {
 	dir := t.TempDir()
 	transcriptPath := filepath.Join(dir, "transcript.txt")
 	if err := os.WriteFile(transcriptPath, nil, 0o600); err != nil {
@@ -140,14 +165,14 @@ func TestDecodeHarvestResponseRejectsEmptyTrustedLongForm(t *testing.T) {
 }
 
 func TestValidateRuntimeCheckResponseUsesPublicContract(t *testing.T) {
-	payload := []byte(`{"contract_version":3,"status":"ok","profile_id":"trusted-long-form-v3","validation_status":"runtime-ready","backend":{"arbitrary":true}}`)
+	payload := []byte(`{"contract_version":4,"status":"ok","profile_id":"adaptive-media-v1","validation_status":"runtime-ready","backend":{"arbitrary":true}}`)
 	if err := ValidateRuntimeCheckResponse(payload); err != nil {
 		t.Fatal(err)
 	}
 	for _, invalid := range [][]byte{
-		[]byte(`{"contract_version":2,"status":"ok","profile_id":"trusted-long-form-v3","validation_status":"runtime-ready"}`),
-		[]byte(`{"contract_version":3,"status":"ok","profile_id":"short-message-v1","validation_status":"runtime-ready"}`),
-		[]byte(`{"contract_version":3,"status":"ok","profile_id":"trusted-long-form-v3","validation_status":"coverage-validated"}`),
+		[]byte(`{"contract_version":3,"status":"ok","profile_id":"adaptive-media-v1","validation_status":"runtime-ready"}`),
+		[]byte(`{"contract_version":4,"status":"ok","profile_id":"legacy-profile","validation_status":"runtime-ready"}`),
+		[]byte(`{"contract_version":4,"status":"ok","profile_id":"adaptive-media-v1","validation_status":"coverage-validated"}`),
 	} {
 		if err := ValidateRuntimeCheckResponse(invalid); err == nil {
 			t.Fatalf("invalid check response was accepted: %s", invalid)
