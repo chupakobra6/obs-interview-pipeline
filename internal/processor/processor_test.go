@@ -36,19 +36,9 @@ func TestPipelineDeletesOnlyAfterValidatedPublish(t *testing.T) {
 	if err := os.WriteFile(source, make([]byte, 1000), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	pipeline := Pipeline{
-		Config: cfg,
-		Transcriber: transcriberFunc(func(context.Context, string, string) (asr.Result, error) {
-			return asr.Result{Text: "Тестовая расшифровка.", SpeechDetected: true, MetalConfirmed: true}, nil
-		}),
-		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options) (Compression, error) {
-			return Compression{VideoMode: "copy", AudioMode: policy.AudioPreserve, SourceAudioTracks: 1, OutputAudioTracks: 1, AudioBitrateKbps: 96}, os.WriteFile(output, make([]byte, 500), 0o600)
-		}),
-		Probe: fakeProbe(source),
-		Remove: func(string) error {
-			return errors.New("delete denied")
-		},
-	}
+	pipeline := successfulPipeline(cfg, source, func(string) error {
+		return errors.New("delete denied")
+	})
 	options := policy.Options{DeleteSource: true, AudioMode: policy.AudioPreserve}
 	result, err := pipeline.Process(context.Background(), source, options)
 	if err == nil || result.FinalDir != "" {
@@ -73,6 +63,143 @@ func TestPipelineDeletesOnlyAfterValidatedPublish(t *testing.T) {
 	}
 	if result.FinalDir != finalDir {
 		t.Fatalf("FinalDir = %q, want %q", result.FinalDir, finalDir)
+	}
+}
+
+func TestPipelineRetryAcceptsAlreadyDeletedSourceAfterValidatedPublish(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig(dir)
+	source := filepath.Join(cfg.AllowedInputDir, "already-deleted.mp4")
+	if err := os.MkdirAll(cfg.AllowedInputDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, make([]byte, 1000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pipeline := successfulPipeline(cfg, source, func(path string) error {
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		return errors.New("simulated crash after unlink")
+	})
+	options := policy.Options{DeleteSource: true, AudioMode: policy.AudioPreserve}
+	if _, err := pipeline.Process(context.Background(), source, options); err == nil {
+		t.Fatal("Process() succeeded despite simulated post-unlink crash")
+	}
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Fatalf("source remains after simulated unlink: %v", err)
+	}
+	pipeline.Remove = func(string) error {
+		t.Fatal("retry attempted to delete an already absent source")
+		return nil
+	}
+	result, err := pipeline.Process(context.Background(), source, options)
+	if err != nil {
+		t.Fatalf("Process() retry error = %v", err)
+	}
+	if result.SourceBytes != 1000 || result.OutputBytes != 500 {
+		t.Fatalf("retry result sizes = %d -> %d", result.SourceBytes, result.OutputBytes)
+	}
+}
+
+func TestPipelineRetryRejectsChangedSourceIdentity(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig(dir)
+	source := filepath.Join(cfg.AllowedInputDir, "replaced.mp4")
+	if err := os.MkdirAll(cfg.AllowedInputDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, make([]byte, 1000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pipeline := successfulPipeline(cfg, source, func(string) error {
+		return errors.New("delete denied")
+	})
+	options := policy.Options{DeleteSource: true, AudioMode: policy.AudioPreserve}
+	if _, err := pipeline.Process(context.Background(), source, options); err == nil {
+		t.Fatal("Process() succeeded, want initial deletion failure")
+	}
+	if err := os.Remove(source); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, make([]byte, 1200), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pipeline.Remove = func(string) error {
+		t.Fatal("retry attempted to delete a replacement source")
+		return nil
+	}
+	if _, err := pipeline.Process(context.Background(), source, options); err == nil || !strings.Contains(err.Error(), "source identity changed") {
+		t.Fatalf("Process() retry error = %v, want source identity rejection", err)
+	}
+	if info, err := os.Stat(source); err != nil || info.Size() != 1200 {
+		t.Fatalf("replacement source was not preserved: info=%v err=%v", info, err)
+	}
+}
+
+func TestPipelineRefusesPublishWhenSourceChangesDuringProcessing(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig(dir)
+	source := filepath.Join(cfg.AllowedInputDir, "changed-during-processing.mp4")
+	if err := os.MkdirAll(cfg.AllowedInputDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, make([]byte, 1000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pipeline := successfulPipeline(cfg, source, func(string) error {
+		t.Fatal("changed source must not be deleted")
+		return nil
+	})
+	pipeline.Compressor = compressorFunc(func(_ context.Context, input, output string, _ media.Probe, _ policy.Options) (Compression, error) {
+		if err := os.WriteFile(input, make([]byte, 1200), 0o600); err != nil {
+			return Compression{}, err
+		}
+		compression := Compression{VideoMode: "copy", AudioMode: policy.AudioPreserve, SourceAudioTracks: 1, OutputAudioTracks: 1, AudioBitrateKbps: 96}
+		return compression, os.WriteFile(output, make([]byte, 500), 0o600)
+	})
+	options := policy.Options{DeleteSource: true, AudioMode: policy.AudioPreserve}
+	if _, err := pipeline.Process(context.Background(), source, options); err == nil || !strings.Contains(err.Error(), "source changed during processing") {
+		t.Fatalf("Process() error = %v, want source change rejection", err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.OutputDir, "changed-during-processing")); !os.IsNotExist(err) {
+		t.Fatalf("changed source result was published: %v", err)
+	}
+	if info, err := os.Stat(source); err != nil || info.Size() != 1200 {
+		t.Fatalf("changed source was not preserved: info=%v err=%v", info, err)
+	}
+}
+
+func TestPipelineRetryRejectsTranscriptThatDiffersFromManifest(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig(dir)
+	source := filepath.Join(cfg.AllowedInputDir, "corrupt-transcript.mp4")
+	if err := os.MkdirAll(cfg.AllowedInputDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, make([]byte, 1000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pipeline := successfulPipeline(cfg, source, func(string) error {
+		return errors.New("delete denied")
+	})
+	options := policy.Options{DeleteSource: true, AudioMode: policy.AudioPreserve}
+	if _, err := pipeline.Process(context.Background(), source, options); err == nil {
+		t.Fatal("Process() succeeded, want initial deletion failure")
+	}
+	transcriptPath := filepath.Join(cfg.OutputDir, "corrupt-transcript", "transcript.md")
+	if err := os.WriteFile(transcriptPath, []byte("# damaged\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pipeline.Remove = func(string) error {
+		t.Fatal("retry attempted deletion with a corrupt transcript")
+		return nil
+	}
+	if _, err := pipeline.Process(context.Background(), source, options); err == nil || !strings.Contains(err.Error(), "transcript differs") {
+		t.Fatalf("Process() retry error = %v, want transcript mismatch", err)
+	}
+	if _, err := os.Stat(source); err != nil {
+		t.Fatalf("source was not preserved: %v", err)
 	}
 }
 
@@ -164,6 +291,20 @@ func testConfig(dir string) config.Config {
 		VideoQuality:           55,
 		AudioBitrateKbps:       96,
 		DeleteSourceOnSuccess:  true,
+	}
+}
+
+func successfulPipeline(cfg config.Config, source string, remove RemoveFunc) Pipeline {
+	return Pipeline{
+		Config: cfg,
+		Transcriber: transcriberFunc(func(context.Context, string, string) (asr.Result, error) {
+			return asr.Result{Text: "Тестовая расшифровка.", SpeechDetected: true, MetalConfirmed: true}, nil
+		}),
+		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options) (Compression, error) {
+			return Compression{VideoMode: "copy", AudioMode: policy.AudioPreserve, SourceAudioTracks: 1, OutputAudioTracks: 1, AudioBitrateKbps: 96}, os.WriteFile(output, make([]byte, 500), 0o600)
+		}),
+		Probe:  fakeProbe(source),
+		Remove: remove,
 	}
 }
 

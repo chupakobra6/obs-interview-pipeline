@@ -1,13 +1,17 @@
 package processor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/chupakobra6/obs-interview-pipeline/internal/asr"
@@ -15,6 +19,8 @@ import (
 	"github.com/chupakobra6/obs-interview-pipeline/internal/media"
 	"github.com/chupakobra6/obs-interview-pipeline/internal/policy"
 )
+
+const manifestVersion = 3
 
 type Compressor interface {
 	Compress(context.Context, string, string, media.Probe, policy.Options) (Compression, error)
@@ -142,14 +148,22 @@ type Result struct {
 }
 
 type manifest struct {
-	Version     int            `json:"version"`
-	SourcePath  string         `json:"source_path"`
-	SourceProbe media.Probe    `json:"source_probe"`
-	OutputProbe media.Probe    `json:"output_probe"`
-	ASR         asr.Result     `json:"asr"`
-	Compression Compression    `json:"compression"`
-	Options     policy.Options `json:"options"`
-	CompletedAt time.Time      `json:"completed_at"`
+	Version        int            `json:"version"`
+	SourcePath     string         `json:"source_path"`
+	SourceIdentity sourceIdentity `json:"source_identity"`
+	SourceProbe    media.Probe    `json:"source_probe"`
+	OutputProbe    media.Probe    `json:"output_probe"`
+	ASR            asr.Result     `json:"asr"`
+	Compression    Compression    `json:"compression"`
+	Options        policy.Options `json:"options"`
+	CompletedAt    time.Time      `json:"completed_at"`
+}
+
+type sourceIdentity struct {
+	Device             uint64 `json:"device"`
+	Inode              uint64 `json:"inode"`
+	SizeBytes          int64  `json:"size_bytes"`
+	ModifiedAtUnixNano int64  `json:"modified_at_unix_nano"`
 }
 
 func New(cfg config.Config) Pipeline {
@@ -166,7 +180,7 @@ func (p Pipeline) Process(ctx context.Context, inputPath string, options policy.
 	if err := options.Validate(); err != nil {
 		return Result{}, err
 	}
-	resolvedInput, err := p.validateInput(inputPath)
+	resolvedInput, err := p.resolveInputPath(inputPath)
 	if err != nil {
 		return Result{}, err
 	}
@@ -183,6 +197,10 @@ func (p Pipeline) Process(ctx context.Context, inputPath string, options policy.
 		return p.finishExisting(ctx, resolvedInput, finalDir, finalVideo, finalTranscript, finalManifest, options)
 	} else if !os.IsNotExist(err) {
 		return Result{}, fmt.Errorf("inspect final directory: %w", err)
+	}
+	initialSourceIdentity, err := inspectSourceIdentity(resolvedInput)
+	if err != nil {
+		return Result{}, err
 	}
 
 	if err := os.MkdirAll(p.Config.OutputDir, 0o700); err != nil {
@@ -266,14 +284,15 @@ func (p Pipeline) Process(ctx context.Context, inputPath string, options policy.
 	}
 	completedAt := time.Now()
 	manifestValue := manifest{
-		Version:     2,
-		SourcePath:  resolvedInput,
-		SourceProbe: sourceProbe,
-		OutputProbe: outputProbe,
-		ASR:         asrResult,
-		Compression: compression,
-		Options:     options,
-		CompletedAt: completedAt,
+		Version:        manifestVersion,
+		SourcePath:     resolvedInput,
+		SourceIdentity: initialSourceIdentity,
+		SourceProbe:    sourceProbe,
+		OutputProbe:    outputProbe,
+		ASR:            asrResult,
+		Compression:    compression,
+		Options:        options,
+		CompletedAt:    completedAt,
 	}
 	if err := writeJSON(tempManifest, manifestValue); err != nil {
 		return Result{}, err
@@ -293,6 +312,9 @@ func (p Pipeline) Process(ctx context.Context, inputPath string, options policy.
 	if err := syncDir(tempDir); err != nil {
 		return Result{}, err
 	}
+	if err := validateSourceIdentity(resolvedInput, initialSourceIdentity); err != nil {
+		return Result{}, fmt.Errorf("source changed during processing: %w", err)
+	}
 	if err := os.Rename(tempDir, finalDir); err != nil {
 		return Result{}, fmt.Errorf("publish processed recording: %w", err)
 	}
@@ -301,7 +323,7 @@ func (p Pipeline) Process(ctx context.Context, inputPath string, options policy.
 		return Result{}, err
 	}
 	if options.DeleteSource {
-		if err := p.Remove(resolvedInput); err != nil {
+		if err := removeSourceIfUnchanged(resolvedInput, initialSourceIdentity, p.Remove); err != nil {
 			return Result{}, fmt.Errorf("processed outputs published but source deletion failed: %w", err)
 		}
 	}
@@ -329,18 +351,40 @@ func (p Pipeline) finishExisting(ctx context.Context, inputPath, finalDir, video
 	if err := json.Unmarshal(payload, &saved); err != nil {
 		return Result{}, fmt.Errorf("decode existing manifest: %w", err)
 	}
+	if saved.Version != manifestVersion {
+		return Result{}, fmt.Errorf("existing manifest version is %d, want %d", saved.Version, manifestVersion)
+	}
 	if saved.SourcePath != inputPath {
 		return Result{}, fmt.Errorf("final directory belongs to different source %s", saved.SourcePath)
 	}
 	if saved.Options != options {
 		return Result{}, fmt.Errorf("existing result belongs to different processing options")
 	}
-	if _, err := os.Stat(transcriptPath); err != nil {
-		return Result{}, fmt.Errorf("existing transcript is unavailable: %w", err)
+	if err := validateTranscript(transcriptPath, filepath.Base(finalDir), saved.ASR); err != nil {
+		return Result{}, err
 	}
 	currentOutput, err := p.Probe(ctx, p.Config.FFprobeCommand, videoPath)
 	if err != nil {
 		return Result{}, fmt.Errorf("probe existing compressed output: %w", err)
+	}
+	if !reflect.DeepEqual(currentOutput, saved.OutputProbe) {
+		return Result{}, fmt.Errorf("existing output media probe differs from its manifest")
+	}
+	currentIdentity, identityErr := inspectSourceIdentity(inputPath)
+	if errors.Is(identityErr, os.ErrNotExist) {
+		if !options.DeleteSource {
+			return Result{}, fmt.Errorf("source is unavailable for a keep-source result: %w", identityErr)
+		}
+		if err := media.ValidateCompressed(saved.SourceProbe, currentOutput, p.Config.OutputWidth, p.Config.OutputHeight, p.Config.OutputFPS, p.Config.AudioBitrateKbps, saved.Compression.OutputAudioTracks); err != nil {
+			return Result{}, fmt.Errorf("validate existing compressed output after source deletion: %w", err)
+		}
+		return resultFromManifest(inputPath, finalDir, videoPath, transcriptPath, manifestPath, saved, currentOutput), nil
+	}
+	if identityErr != nil {
+		return Result{}, identityErr
+	}
+	if currentIdentity != saved.SourceIdentity {
+		return Result{}, fmt.Errorf("source identity changed since the published result")
 	}
 	currentSource, err := p.Probe(ctx, p.Config.FFprobeCommand, inputPath)
 	if err != nil {
@@ -350,33 +394,82 @@ func (p Pipeline) finishExisting(ctx context.Context, inputPath, finalDir, video
 		return Result{}, fmt.Errorf("validate existing compressed output: %w", err)
 	}
 	if options.DeleteSource {
-		if err := p.Remove(inputPath); err != nil {
+		if err := removeSourceIfUnchanged(inputPath, saved.SourceIdentity, p.Remove); err != nil {
 			return Result{}, fmt.Errorf("delete source after existing output validation: %w", err)
 		}
 	}
+	return resultFromManifest(inputPath, finalDir, videoPath, transcriptPath, manifestPath, saved, currentOutput), nil
+}
+
+func resultFromManifest(inputPath, finalDir, videoPath, transcriptPath, manifestPath string, saved manifest, output media.Probe) Result {
 	return Result{
 		SourcePath:     inputPath,
 		FinalDir:       finalDir,
 		VideoPath:      videoPath,
 		TranscriptPath: transcriptPath,
 		ManifestPath:   manifestPath,
-		SourceBytes:    currentSource.SizeBytes(),
-		OutputBytes:    currentOutput.SizeBytes(),
+		SourceBytes:    saved.SourceProbe.SizeBytes(),
+		OutputBytes:    output.SizeBytes(),
 		ASR:            saved.ASR,
 		Compression:    saved.Compression,
 		Options:        saved.Options,
 		CompletedAt:    saved.CompletedAt,
+	}
+}
+
+func inspectSourceIdentity(path string) (sourceIdentity, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return sourceIdentity{}, fmt.Errorf("stat source identity: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 {
+		return sourceIdentity{}, fmt.Errorf("source identity requires a non-empty regular file")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return sourceIdentity{}, fmt.Errorf("source identity is unavailable")
+	}
+	return sourceIdentity{
+		Device:             uint64(stat.Dev),
+		Inode:              uint64(stat.Ino),
+		SizeBytes:          info.Size(),
+		ModifiedAtUnixNano: info.ModTime().UnixNano(),
 	}, nil
 }
 
-func (p Pipeline) validateInput(path string) (string, error) {
+func validateSourceIdentity(path string, expected sourceIdentity) error {
+	actual, err := inspectSourceIdentity(path)
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return fmt.Errorf("source identity changed")
+	}
+	return nil
+}
+
+func removeSourceIfUnchanged(path string, expected sourceIdentity, remove RemoveFunc) error {
+	if err := validateSourceIdentity(path, expected); err != nil {
+		return fmt.Errorf("refuse to delete source: %w", err)
+	}
+	return remove(path)
+}
+
+func (p Pipeline) resolveInputPath(path string) (string, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return "", fmt.Errorf("resolve input path: %w", err)
 	}
 	resolved, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
-		return "", fmt.Errorf("resolve input symlinks: %w", err)
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("resolve input symlinks: %w", err)
+		}
+		resolvedParent, parentErr := filepath.EvalSymlinks(filepath.Dir(absPath))
+		if parentErr != nil {
+			return "", fmt.Errorf("resolve missing input parent: %w", parentErr)
+		}
+		resolved = filepath.Join(resolvedParent, filepath.Base(absPath))
 	}
 	allowed, err := filepath.EvalSymlinks(p.Config.AllowedInputDir)
 	if err != nil {
@@ -385,13 +478,6 @@ func (p Pipeline) validateInput(path string) (string, error) {
 	relative, err := filepath.Rel(allowed, resolved)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("input %s is outside allowed directory %s", resolved, allowed)
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return "", fmt.Errorf("stat input: %w", err)
-	}
-	if !info.Mode().IsRegular() || info.Size() <= 0 {
-		return "", fmt.Errorf("input must be a non-empty regular file")
 	}
 	switch strings.ToLower(filepath.Ext(resolved)) {
 	case ".mp4", ".mov", ".mkv":
@@ -402,17 +488,39 @@ func (p Pipeline) validateInput(path string) (string, error) {
 }
 
 func writeTranscript(path, title string, result asr.Result) error {
+	payload, err := transcriptPayload(title, result)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		return fmt.Errorf("write transcript: %w", err)
+	}
+	return nil
+}
+
+func validateTranscript(path, title string, result asr.Result) error {
+	want, err := transcriptPayload(title, result)
+	if err != nil {
+		return err
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read existing transcript: %w", err)
+	}
+	if !bytes.Equal(got, want) {
+		return fmt.Errorf("existing transcript differs from its manifest")
+	}
+	return nil
+}
+
+func transcriptPayload(title string, result asr.Result) ([]byte, error) {
 	text := strings.TrimSpace(result.Text)
 	if !result.SpeechDetected {
 		text = "_Речь не обнаружена._"
 	} else if text == "" {
-		return fmt.Errorf("ASR reported speech but returned an empty transcript")
+		return nil, fmt.Errorf("ASR reported speech but returned an empty transcript")
 	}
-	payload := fmt.Sprintf("# Расшифровка: %s\n\n%s\n", title, text)
-	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
-		return fmt.Errorf("write transcript: %w", err)
-	}
-	return nil
+	return []byte(fmt.Sprintf("# Расшифровка: %s\n\n%s\n", title, text)), nil
 }
 
 func writeJSON(path string, value any) error {
