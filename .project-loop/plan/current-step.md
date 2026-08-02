@@ -4,30 +4,21 @@
 Обновлено: 2026-08-02
 
 ## Активный Шаг
-- id: `STEP-009R`
+- id: `STEP-010R`
 - status: `готово`
-- objective: Завершить tooling-review, удалить disposable benchmark/E2E state, проверить Project Loop и создать focused commits обоих репозиториев.
-- requirement IDs: `REQ-024`, `REQ-025`, `REQ-026`, `VAL-013`, `VAL-014`
-- owned paths: Project Loop evidence/handoff; Git staging только текущих изменений; временный `/tmp/obs-asr-policy.23ljVp`
-- validation: repo/runtime/process inventory, loopctl validate, git diff/status, installed v3 doctor readback
-- done criteria: временный corpus/results/source/output перемещены в Корзину, Whisper processes отсутствуют, loop validate зелёный, два локальных focused commits созданы.
+- objective: Завершить опубликованные Telegram Harvest и OBS pipeline через tooling-review, repo-polish и выборочный session-learnings pass.
+- requirement IDs: `REQ-027`, `VAL-015`
+- owned paths: безопасные code/test/docs/DX findings в обоих репозиториях; Project Loop source/checklist/plan/handoff; ближайшие устойчивые repo-specific правила при доказанной необходимости
+- validation: help/README/CI review, focused/full/race tests, cross-repo contract check, installed doctor, Project Loop validate, Git/runtime/process inventory и GitHub CI после push
+- done criteria: review findings устранены либо явно отклонены с причиной; постоянные learnings не дублируют существующие правила; оба репозитория проверены, закоммичены, запушены и синхронны с upstream.
 
 ## Фокус Ревью
-- Delete gate исключает потерю исходника при любой частичной ошибке.
-- Queue/LaunchAgent не блокируют OBS и не запускают параллельные ASR jobs.
-- Команды не зависят от shell quoting или пользовательского PATH.
-- Медиапроверка покрывает codec, dimensions, fps, duration и audio streams.
-- Установка идемпотентна и не захватывает старые записи.
+- Manifest/delete retry проверяет identity source и точное соответствие transcript/output до `unlink`.
+- Public help/README называют только два актуальных ASR profile и один Harvest source of truth.
+- GitHub CI выполняет check/audit/race в bounded runner; OBS CI остаётся macOS-native.
+- Session learnings живут в behavior tests и одном коротком Harvest rule, без отдельного task-shaped документа.
 
 ## Примечания
-- Игорь явно попросил выполнить и проверить весь pipeline, поэтому разрешено непрерывное выполнение всех подэтапов STEP-001.
-- S003 явно продолжает выполнение без паузы для переноса ASR ownership и улучшения уведомлений.
-- S004 возвращает alert style «Временно»; helper остаётся активным до отложенного клика.
-- S005 разрешает обработку явно выбранного реального собеседования обычным delete gate.
-- S006 требует tooling-review/repo-polish и удаления только созданных проверками хвостов.
-- S007 заменяет OBS-специфичные gate/audio/video требования: основной Telegram Harvest workflow остаётся с Silero, OBS получает явный fast path.
-- S008 заменяет master-only default и автоматический enqueue: решение принимается в prompt для каждой записи.
-- S009 требует качества без потери межчанкового контекста; fixed-chunk v1 заменяется после A/B, а не расширяется без доказательства необходимости.
-- S011 ввёл contract v2 и bounded tail validation; S013 поднимает текущий transcript contract до v3. Статус `coverage-validated` по-прежнему не трактуется как WER/CER.
-- S012 предлагает `max_len=-1`; source inspection показывает, что character wrap зависит от `token_timestamps=true`, тогда как production отправляет false. Решение принимается только после same-file A/B.
-- S013 запрещает выбирать статический русский prompt только по одному интервью: нужны RU/EN и edge-case evidence, одна адаптивная OBS policy и минимальная публичная поверхность Harvest.
+- `coverage-validated` доказывает timestamps и покрытие хвоста, но не WER/CER.
+- Public repository остаётся без LICENSE: выбор лицензии требует отдельного решения владельца и не подменён polish-pass предположением.
+- Subagents не использовались; review выполнен отдельным scenario-first self-review проходом.

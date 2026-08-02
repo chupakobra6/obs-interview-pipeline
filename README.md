@@ -1,5 +1,7 @@
 # OBS Interview Pipeline
 
+[![CI](https://github.com/chupakobra6/obs-interview-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/chupakobra6/obs-interview-pipeline/actions/workflows/ci.yml)
+
 После остановки записи OBS проект показывает короткий macOS-диалог: обработать запись или оставить как есть, удалять ли исходник после успеха и сводить ли аудиодорожки. Выбранная запись превращается в компактное HEVC-видео и Markdown-расшифровку; удаление возможно только после полной проверки результата.
 
 ## Что происходит после остановки записи
@@ -20,7 +22,7 @@
 └── manifest.json
 ```
 
-`manifest.json` хранит техническое доказательство обработки: параметры source/output, ASR timings, флаг подтверждённого Metal runtime и выбранный video mode (`copy` либо `transcode`).
+`manifest.json` хранит техническое доказательство обработки: identity и параметры source, точный output probe, ASR timings, флаг подтверждённого Metal runtime и выбранный video mode (`copy` либо `transcode`). Перед повторной попыткой удаления worker сверяет source identity, transcript и output с этим manifest.
 
 ## Локальный профиль
 
@@ -35,7 +37,7 @@
 
 ## Установка и проверка
 
-Требуются macOS, OBS Studio, Go, соседний `/Users/igor/projects/telegram-harvest` с готовым ASR runtime и `ffmpeg`:
+Требуются macOS, OBS Studio, Go 1.26.5, соседний [Telegram Harvest](https://github.com/chupakobra6/telegram-harvest) в `/Users/igor/projects/telegram-harvest` с готовым ASR runtime и `ffmpeg`:
 
 ```bash
 brew install ffmpeg
@@ -93,11 +95,21 @@ bin/obs-interview-processor enqueue --delete-source=false --audio-mode=preserve 
 - Worker не сканирует старые файлы в `~/Movies`; он обрабатывает только пути, переданные OBS hook.
 - Вход обязан быть обычным непустым `.mp4`, `.mov` или `.mkv` внутри `allowed_input_dir`.
 - Jobs выполняются последовательно: два ASR/VideoToolbox pipeline одновременно не запускаются.
-- При ошибке ASR, компрессии, проверки, публикации или удаления исходник остаётся на месте.
+- При ошибке ASR, компрессии, проверки или публикации исходник остаётся на месте; `unlink` начинается только после этих gates. Если worker завершился уже после успешного `unlink`, retry распознаёт это состояние по валидному опубликованному результату.
+- Device/inode, размер и modification time source фиксируются до работы и повторно проверяются перед публикацией и `unlink`; файл, заменённый по тому же пути во время обработки или retry, не удаляется.
+- Retry после публикации требует точного совпадения transcript и media probe с manifest. Если предыдущий worker уже удалил source, повтор считается успешным только для `delete_source=true` и только после повторной проверки опубликованного результата.
 - Если output не меньше source, проверка не проходит и исходник сохраняется. На прямом HEVC fast path уменьшение даёт перекодирование каждой AAC-дорожки со 160 до target 96 Кбит/с; для тишины фактический средний bitrate может быть заметно ниже target.
 - Повтор после сбоя удаления заново проверяет уже опубликованные результаты и только затем повторяет удаление source.
 
-## Проверенный текущий сценарий
+## Производительность ASR
+
+На реальном интервью исходный файл длительностью `971,97 с` содержал `178,49 с` pre-roll; после trimming Whisper декодировал `793,41 с` аудио. Свежий production-прогон занял `47,60 с`: это `20,42× realtime` относительно всего файла или консервативные `16,67×` относительно реально декодированной части. Языковой probe занял `0,89 с`, long-form preparation — `1,67 с`, хвост ASR отстал от последней VAD-речи только на `0,33 с`.
+
+На английском ground-truth sample длительностью `204,78 с` тот же профиль закончил за `9,91 с` (`20,66× realtime`, WER `0,96%`). Практический диапазон на текущем Mac — примерно `15–21× realtime` в зависимости от Metal-нагрузки. Полная матрица вариантов и оговорки по silver reference находятся в [adaptive-long-form-benchmark.md](.project-loop/evidence/adaptive-long-form-benchmark.md).
+
+Это скорость ASR. Полный job также включает AAC/HEVC обработку и публикацию; ASR и media pipeline выполняются параллельно. Для готового OBS HEVC video stream копируется, поэтому длительное повторное video encode отсутствует.
+
+## Проверенный HEVC fast path
 
 Current-head E2E `2026-08-01 18-24-50` прошёл через настоящий OBS Stop, новый native dialog, Lua-hook, LaunchAgent и установленный Harvest:
 

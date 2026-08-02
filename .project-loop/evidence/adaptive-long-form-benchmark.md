@@ -48,6 +48,7 @@ bounded leading/trailing Silero
 - last VAD speech 786,91 с; last ASR segment 786,58 с; gap 0,33 с при tolerance 2 с;
 - greeting and farewell present; adjacent repeats 0; prompt-only leakage на RU edge cases 0;
 - output SHA-256 стабилен между CLI current-head и тремя independent direct-policy runs.
+- Повторный post-publish production run на том же полном source: wall `47,60 с`, language detection `0,89 с`, preparation `1,67 с`, те же `199` timestamped segments и coverage gap `0,33 с`; это `20,42× realtime` по исходным `971,97 с` или `16,67×` по декодированным `793,41 с`.
 
 ## Вывод
 
