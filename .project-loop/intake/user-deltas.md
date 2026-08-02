@@ -297,7 +297,8 @@ ID источника: `S015`
 - [x] добавить точную консервативную диагностику циклических повторов и не называть terminal cleanup общей repetition validation;
 - [x] синхронно обновить OBS consumer и документацию без compatibility alias;
 - [x] проверить real Telegram corpus, leading-silence regression, реальное интервью и full/race flow;
-- [ ] переустановить OBS binary из чистого финального HEAD, выполнить integrated flow и проверить installed provenance/CI.
+- [x] переустановить OBS binary из чистого HEAD, выполнить integrated flow и проверить installed provenance;
+- [ ] запушить оба репозитория и дождаться post-push CI.
 
 Принятая граница:
 - mixed-language внутри одной записи не входит в этот шаг; единый probe выбирает доминирующий режим записи.
@@ -309,4 +310,4 @@ ID источника: `S015`
 - [x] план и текущий шаг обновлены
 - [x] реализация и A/B завершены
 - [x] reviewer проверил
-- [ ] handoff и operational closure обновлены
+- [x] handoff и operational closure обновлены

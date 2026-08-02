@@ -10,7 +10,7 @@
 - requirement IDs: `REQ-028`, `REQ-029`, `REQ-030`, `CON-006`, `VAL-017`
 - owned paths: Project Loop closure state; installed OBS/Harvest runtime; disposable E2E artifacts; GitHub CI
 - validation: clean current-head install, doctor contract v4, real adaptive OBS→Harvest E2E, process/temp inventory, Project Loop validate и post-push CI
-- done criteria: установленный binary имеет чистый final provenance; contract v4/profile adaptive-media-v1 активен; временных артефактов/процессов нет; оба origin и CI зелёные.
+- done criteria: установленный binary имеет чистый final provenance; contract v4/profile adaptive-media-v1 активен; временных артефактов/процессов нет; оба origin и post-push CI зелёные.
 
 ## Фокус Ревью
 - Один public profile не означает один и тот же decode для любой длительности: adaptive router обязан сохранять short quality/performance и включать long protection только по проверяемым признакам.

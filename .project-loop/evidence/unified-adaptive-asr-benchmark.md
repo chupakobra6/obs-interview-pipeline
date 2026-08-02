@@ -70,3 +70,18 @@ Corpus: 42 реальных Telegram media, 2178,413 секунды; 30 speech �
 ## Ограничение
 
 Один probe выбирает доминирующий язык всей записи. Mixed-language routing внутри одного файла не реализован по явному решению пользователя.
+
+## Установленный OBS→Harvest E2E
+
+После focused commits оба бинарника собраны из чистых HEAD: `vcs.modified=false`. `make install && make doctor` подтвердил contract `4`, profile `adaptive-media-v1`, локальный Harvest runtime, Metal backend contract, HEVC VideoToolbox и оба signed macOS helper.
+
+Disposable production input содержал 15 секунд тишины перед реальным 26,77-секундным русским Telegram voice:
+
+- route `leading-silence-threshold`, offset 14,49 секунды;
+- физический probe 0,84 секунды, один timestamped inference;
+- полный русский текст с пунктуацией;
+- `coverage-validated`, tail gap 0, `repetition_validated=true`;
+- Metal подтверждён;
+- HEVC 1512×982@30 скопирован без повторного encode, AAC сохранён;
+- source был сохранён test policy, затем весь disposable source/result перенесён в Корзину;
+- временных `.processing-*` и фоновых Whisper/process jobs не осталось.

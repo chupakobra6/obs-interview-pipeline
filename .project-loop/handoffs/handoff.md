@@ -44,6 +44,9 @@
 - `staticcheck` и `govulncheck` обоих репозиториев — зелёные; вызываемых уязвимостей 0.
 - Telegram A/B: 42 real media без semantic regression; 6/6 fresh voice exact; short median overhead +0,021 s.
 - Real interview: 1529 words, 199 monotonic segments, tail gap 0,334 s, total 42,30 s; exact transcript SHA совпал с ранее принятым long result.
+- Clean installed production E2E: 15 s leading silence → offset 14,49 s, punctuated RU transcript, `coverage-validated`, gap 0, Metal true; HEVC 1512×982@30 + AAC readback зелёный.
+- Installed `go version -m` показал `vcs.modified=false`; после closure commit установка повторяется из финального чистого HEAD.
+- Disposable E2E source/result перемещены в Корзину; `.processing-*` и фоновые Whisper/processor процессы отсутствуют.
 - Project Loop validate — зелёный.
 - GitHub CI: OBS `f1c6605` и Harvest `b2fbd80` — зелёные; финальный docs/loop closure проходит отдельный post-push CI gate.
 - Временные benchmark/E2E artifacts отсутствуют; тесты используют `t.TempDir()`.
@@ -55,7 +58,7 @@
 
 ## Следующее Действие
 
-- Сделать focused commits, установить OBS worker из чистого HEAD, выполнить doctor и disposable integrated adaptive E2E, затем push/CI и cleanup.
+- Запушить оба репозитория, дождаться CI и закрыть STEP-011R; mixed-language routing внутри одной записи остаётся явной отложенной границей.
 
 ## Источники Правды
 
