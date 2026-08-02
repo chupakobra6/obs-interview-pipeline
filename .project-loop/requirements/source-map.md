@@ -1,7 +1,7 @@
 # Карта Источников
 
 Проект: obs-interview-pipeline
-Обновлено: 2026-08-01
+Обновлено: 2026-08-02
 
 ## Приоритет Источников
 1. Текущая прямая инструкция Игоря.
@@ -23,6 +23,8 @@
 | S006 | user delta | 2026-08-01 | `.project-loop/intake/user-deltas.md` | принято | Провести tooling-review, repo-polish и удалить созданные проверками артефакты без затрагивания реального результата. |
 | S007 | user delta | 2026-08-01 | `.project-loop/intake/user-deltas.md` | принято | OBS fast path: Harvest ASR без whole-file Silero gate, прямой HEVC VideoToolbox, отсутствие лишних scale/fps/video encode, первая master AAC 96 Кбит/с. |
 | S008 | user delta | 2026-08-01 | `.project-loop/intake/user-deltas.md` | принято | Исправить потерю начала transcript; после OBS Stop спрашивать режим обработки, delete policy и merge tracks; по умолчанию сохранять все tracks с AAC 96. |
+| S009 | user delta | 2026-08-02 | `.project-loop/intake/user-deltas.md` | принято | Заменить фиксированные 120-секундные чанки качественным long-form алгоритмом без искусственных границ; проверить нативный timestamped decode и реальный transcript. |
+| S010 | primary research + experiment | 2026-08-02 | `ggml-org/whisper.cpp@v1.9.1/examples/server/server.cpp`, `openai/whisper/whisper/transcribe.py`, real-file A/B | принято | Server поддерживает request-level timestamps; нативный decoder переносит контекст и продвигается по timestamp-токенам. На trimmed interview timestamps дали полный текст, `no_timestamps` зациклился после 290 слов. |
 
 ## Конфликты
 | Источники | Решение | Дата |
@@ -31,3 +33,4 @@
 | CON-002 из S002 и новая инструкция S003 | S003 имеет больший приоритет: разрешено изменить Telegram Harvest, сохранив read-only границу Telegram. | 2026-08-01 |
 | REQ-002/REQ-003 и новая инструкция S007 | S007 заменяет OBS-специфичные gate/audio/video требования; основной Telegram Harvest workflow не меняется. | 2026-08-01 |
 | REQ-013 и новая инструкция S008 | S008 заменяет master-only default: новый default сохраняет все дорожки; сведение в одну становится per-job opt-in. | 2026-08-01 |
+| Реализованный fixed-chunk v1 из S008 и требование качества S009 | S009 заменяет фиксированные чанки и word-overlap merge; bounded leading trim сохраняется, а дальнейший decode выбирается по доказательству полноты и качества. | 2026-08-02 |

@@ -24,6 +24,7 @@ func TestDecodeHarvestResponseValidatesContractAndTranscript(t *testing.T) {
 		MetalConfirmed:  true,
 		Engine:          "whispercpp",
 		Backend:         json.RawMessage(`{"backend":"whispercpp","accelerator":"metal"}`),
+		Diagnostics:     validLongFormDiagnostics(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -32,7 +33,7 @@ func TestDecodeHarvestResponseValidatesContractAndTranscript(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ContractVersion != harvestContractVersion || !result.MetalConfirmed || result.Engine != "whispercpp" {
+	if result.ContractVersion != harvestContractVersion || !result.MetalConfirmed || result.Engine != "whispercpp" || !json.Valid(result.Diagnostics) {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 }
@@ -106,4 +107,31 @@ func TestDecodeHarvestResponseRejectsEmptyAssumedSpeech(t *testing.T) {
 	if _, err := decodeHarvestResponse(payload, transcriptPath); err == nil || !strings.Contains(err.Error(), "no transcript") {
 		t.Fatalf("unexpected empty transcript error: %v", err)
 	}
+}
+
+func TestDecodeHarvestResponseRejectsMissingLongFormDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "transcript.txt")
+	if err := os.WriteFile(transcriptPath, []byte("Речь."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(harvestResponse{
+		ContractVersion: harvestContractVersion,
+		Status:          "ok",
+		Text:            "Речь.",
+		SpeechDetected:  true,
+		MetalConfirmed:  true,
+		Engine:          "whispercpp",
+		Backend:         json.RawMessage(`{"backend":"whispercpp","accelerator":"metal"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeHarvestResponse(payload, transcriptPath); err == nil || !strings.Contains(err.Error(), "long-form diagnostics") {
+		t.Fatalf("unexpected diagnostics error: %v", err)
+	}
+}
+
+func validLongFormDiagnostics() json.RawMessage {
+	return json.RawMessage(`{"segments":2,"timestamped_segments":true,"decoded_audio_duration_seconds":12.5,"last_segment_end_seconds":12.1}`)
 }

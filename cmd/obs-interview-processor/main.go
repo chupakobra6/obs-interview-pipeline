@@ -274,8 +274,10 @@ func doctor(ctx context.Context, cfg config.Config, stdout io.Writer) error {
 					BeamSize int `json:"beam_size"`
 				} `json:"decode"`
 				SpeechGate      json.RawMessage `json:"speech_gate"`
-				TrustedLongForm json.RawMessage `json:"trusted_long_form"`
-				PostFilter      string          `json:"post_filter"`
+				TrustedLongForm *struct {
+					DecodeStrategy string `json:"decode_strategy"`
+				} `json:"trusted_long_form"`
+				PostFilter string `json:"post_filter"`
 			} `json:"backend"`
 		}
 		decodeErr := json.Unmarshal(asrOutput, &asrResponse)
@@ -287,7 +289,8 @@ func doctor(ctx context.Context, cfg config.Config, stdout io.Writer) error {
 			asrResponse.Backend.Decode.BeamSize == 5 &&
 			asrResponse.Backend.PostFilter == "terminal-exact-v1" &&
 			len(asrResponse.Backend.SpeechGate) == 0 &&
-			len(asrResponse.Backend.TrustedLongForm) > 0
+			asrResponse.Backend.TrustedLongForm != nil &&
+			asrResponse.Backend.TrustedLongForm.DecodeStrategy == "native-timestamped-v1"
 		checks = append(checks, check{Name: "telegram-harvest-asr", OK: asrOK, Detail: oneLineDetail(string(asrOutput))})
 	}
 	encoderOutput, encoderErr := exec.CommandContext(ctx, cfg.FFmpegCommand, "-hide_banner", "-encoders").CombinedOutput()

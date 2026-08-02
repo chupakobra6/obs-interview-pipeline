@@ -30,7 +30,7 @@
 - Source: H.265/HEVC через Apple VideoToolbox + три выбранные в OBS AAC-дорожки.
 - Final: тот же video stream без повторной потери качества, если source уже HEVC `1512x982@30`; по умолчанию те же три дорожки в AAC с target 96 Кбит/с либо одна сведённая дорожка при выборе merge.
 - Video quality: OBS использует CRF quality `55`; fallback-transcode старого входа использует тот же `-q:v 55`. В шкале VideoToolbox большее число означает выше качество и больший ожидаемый bitrate/размер.
-- ASR: production-вход Telegram Harvest с `--trusted-long-form`. Канонический Silero короткими окнами находит первый голос, сохраняется секундный lead-in, а Whisper сбрасывает контекст между 120-секундными чанками. `large-v3-turbo-q5_0`, Metal, русский decode profile и post-filter остаются единым профилем Harvest; обычный Telegram workflow продолжает использовать whole-file Silero gate.
+- ASR: production-вход Telegram Harvest с `--trusted-long-form`. Канонический Silero короткими окнами находит первый голос и сохраняет секундный lead-in; затем Whisper одним timestamped long-form запросом сам ведёт окна и контекст до конца записи. Искусственных 120-секундных границ и текстовой склейки нет. `large-v3-turbo-q5_0`, Metal, русский decode profile и post-filter остаются единым профилем Harvest; обычный Telegram workflow продолжает использовать whole-file Silero gate.
 - Уведомление: клик по success notification открывает Finder сразу в каталоге готового собеседования.
 
 ## Установка и проверка

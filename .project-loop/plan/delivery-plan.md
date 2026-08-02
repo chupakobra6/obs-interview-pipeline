@@ -1,7 +1,7 @@
 # План Поставки
 
 Проект: obs-interview-pipeline
-Обновлено: 2026-08-01
+Обновлено: 2026-08-02
 
 ## Этапы
 | Шаг | Статус | ID требований | Цель | Ревью | Проверка |
@@ -21,6 +21,9 @@
 | STEP-005A | `готово` | REQ-014..REQ-016 | Диагностировать начало ASR; добавить per-job policy, preserve/merge audio и native post-recording prompt. | Self-review audio selection, non-blocking UI launch, cancel/delete safety и single source of truth. | Focused tests и реальный diagnostic sample зелёные. |
 | STEP-005B | `готово` | VAL-009 | Установить current head и провести OBS UI/E2E проверки prompt и audio lifecycle. | Сопоставить OBS logs, dialog state, queue job, ffprobe, manifest и source lifecycle. | Cancel/process paths и preserve/merge contracts подтверждены. |
 | STEP-005R | `готово` | REQ-010, REQ-014..REQ-016 | Финальный review, cleanup, docs, validation и focused commit. | Проверить diff, installed/runtime state и остаточные риски. | Full/race checks, doctor и loop validate зелёные; disposable artifacts перемещены в Корзину. |
+| STEP-006A | `готово` | REQ-017..REQ-019 | Проверить первопричину на whisper.cpp v1.9.1 и реализовать минимальный качественный long-form decode в Harvest без искусственных границ. | Self-review API options, timestamp semantics, обычных Telegram/file flows и удаления прежней chunk/merge ветки. | Primary-source evidence, focused Harvest tests и descriptor contract зелёные. |
+| STEP-006B | `готово` | VAL-010 | Установить current head и провести A/B на реальном собеседовании плюс long-form regression cases. | Проверить начало/середину/конец, прежние 120-секундные границы, повторения, timestamps и runtime. | Real A/B полный; boundary regression использует 240 s и речь/термин через прежнюю 120 s границу. |
+| STEP-006R | `готово` | REQ-010, REQ-017..REQ-019, VAL-010 | Финальный tooling-review, cleanup, docs, current-head validation и focused commits обоих репозиториев. | Проверить diff, единственный источник ASR, installed/runtime state и остаточные риски. | Full/race checks и installed doctor зелёные; benchmark artifacts очищены; focused commits созданы. |
 
 ## Примечания По Порядку
 - Шаги достаточно маленькие для цикла: реализация, ревью, исправление, проверка, коммит, handoff.

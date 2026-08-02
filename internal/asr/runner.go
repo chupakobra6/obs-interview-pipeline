@@ -28,6 +28,7 @@ type Result struct {
 	SpeechGate      time.Duration   `json:"speech_gate"`
 	LongFormPrep    time.Duration   `json:"long_form_preparation"`
 	LeadingOffset   float64         `json:"leading_speech_offset_seconds,omitempty"`
+	Diagnostics     json.RawMessage `json:"diagnostics,omitempty"`
 	Inference       time.Duration   `json:"inference"`
 	Total           time.Duration   `json:"total"`
 	MetalConfirmed  bool            `json:"metal_confirmed"`
@@ -54,6 +55,7 @@ type harvestResponse struct {
 	SpeechGate      time.Duration   `json:"speech_gate"`
 	LongFormPrep    time.Duration   `json:"long_form_preparation"`
 	LeadingOffset   float64         `json:"leading_speech_offset_seconds,omitempty"`
+	Diagnostics     json.RawMessage `json:"diagnostics"`
 	Inference       time.Duration   `json:"inference"`
 	Total           time.Duration   `json:"total"`
 }
@@ -152,6 +154,19 @@ func decodeHarvestResponse(payload []byte, transcriptPath string) (Result, error
 	if strings.TrimSpace(string(transcript)) != strings.TrimSpace(response.Text) {
 		return Result{}, fmt.Errorf("telegram-harvest transcript file differs from its JSON response")
 	}
+	if response.SpeechDetected {
+		var diagnostics struct {
+			Segments                    int     `json:"segments"`
+			TimestampedSegments         bool    `json:"timestamped_segments"`
+			DecodedAudioDurationSeconds float64 `json:"decoded_audio_duration_seconds"`
+			LastSegmentEndSeconds       float64 `json:"last_segment_end_seconds"`
+		}
+		if err := json.Unmarshal(response.Diagnostics, &diagnostics); err != nil ||
+			diagnostics.Segments == 0 || !diagnostics.TimestampedSegments ||
+			diagnostics.DecodedAudioDurationSeconds <= 0 || diagnostics.LastSegmentEndSeconds <= 0 {
+			return Result{}, fmt.Errorf("telegram-harvest ASR omitted valid long-form diagnostics")
+		}
+	}
 	return Result{
 		ContractVersion: response.ContractVersion,
 		Text:            response.Text,
@@ -163,6 +178,7 @@ func decodeHarvestResponse(payload []byte, transcriptPath string) (Result, error
 		SpeechGate:      response.SpeechGate,
 		LongFormPrep:    response.LongFormPrep,
 		LeadingOffset:   response.LeadingOffset,
+		Diagnostics:     response.Diagnostics,
 		Inference:       response.Inference,
 		Total:           response.Total,
 		MetalConfirmed:  response.MetalConfirmed,

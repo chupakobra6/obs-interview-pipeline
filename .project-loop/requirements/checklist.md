@@ -1,7 +1,7 @@
 # Чеклист Требований
 
 Проект: obs-interview-pipeline
-Обновлено: 2026-08-01
+Обновлено: 2026-08-02
 
 ## Значения Статусов
 Используй `кандидат`, `принято`, `в работе`, `готово`, `отложено`, `заблокировано` или `отклонено`.
@@ -25,6 +25,9 @@
 | REQ-014 | `готово` | S008 | После OBS Stop открывается неблокирующий native dialog: обработать/оставить, удалить source и свести audio tracks. | OBS UI не блокируется; process создаёт job с выбранными options; cancel не создаёт job и сохраняет source. | UI: dialog показал exact filename и оба checkbox; cancel оставил source и пустую queue; process job сохранил `delete_source=false`, `audio_mode=preserve`. |
 | REQ-015 | `готово` | S008 | Default audio mode сохраняет все source tracks раздельно с AAC target 96 Кбит/с; merge mode создаёт одну сведённую track. | `ffprobe` подтверждает ожидаемое число AAC streams для обоих режимов; manifest/job сохраняют выбранную policy. | OBS E2E: 3×AAC source → 3×AAC final, 4,917,452 → 3,417,831 B; disposable integration подтверждает merge → 1×AAC. |
 | REQ-016 | `готово` | S008 | ASR корректно обрабатывает тихое начало реального OBS-аудио и не заполняет leading silence повторяющимися hallucinations. | Диагностика фиксирует root cause; focused regression и повторная расшифровка начала подтверждают исправление при прежнем Harvest model/Metal/ru/post-filter. | Реальный source: первая речь 179.49 s; trusted long-form с lead-in 178.49 s начал с приветствия, убрал hallucinations и завершился за 37.82 s при прежнем q5_0/Metal/ru/beam 5/post-filter. |
+| REQ-017 | `готово` | S009, S010 | Trusted long-form после bounded leading-silence trim декодирует запись без фиксированных временных границ и без потери контекста между независимыми запросами. | Один логически непрерывный decode покрывает речь от начала до конца; алгоритм не режет файл каждые 120 секунд и не зависит от точного совпадения слов при склейке. | Fixed chunk extraction/word merge удалены; один native request покрывает 793.41 s и 344 segments. |
+| REQ-018 | `готово` | S009, S010 | Harvest использует timestamps как часть long-form decode и диагностики полноты, сохраняя прежние model q5_0, Metal, русский профиль, decode settings и post-filter. | Descriptor и тесты подтверждают timestamped long-form strategy; timestamps монотонны, transcript проходит существующий post-filter. | Descriptor `native-timestamped-v1`; response duration и monotonic timestamps fail-fast; real diagnostics: last segment 787.40 s, terminal-repeat filter удалил 3 повтора. |
+| REQ-019 | `готово` | S009 | Новый алгоритм остаётся явным trusted long-form режимом OBS и не меняет production-поведение Telegram или обычного `transcribe-file`. | Regression tests подтверждают прежний whole-file Silero gate в Telegram flow и отсутствие timestamped long-form override в обычном file flow. | Normal inference явно отправляет `no_timestamps=true`; helper regression и full/race suites зелёные; OBS единственный caller `--trusted-long-form`. |
 
 ## Ограничения
 | ID | Статус | Источник | Ограничение | Доказательства |
@@ -46,6 +49,7 @@
 | VAL-007 | `готово` | S006 | Tooling-review/repo-polish заканчиваются clean inventory и current-head validation. | `make check`, race, doctor, loop validate, Git/runtime/process inventory зелёные после cleanup. |
 | VAL-008 | `готово` | S007 | Короткая запись реальным OBS проходит новый fast path через установленные HEAD обоих репозиториев. | OBS source HEVC/1512x982@30/3 audio; ASR без gate; final video stream copied, 1×AAC target 96 Кбит/с; source удалён только после validation; disposable result/job/notification очищены. | E2E 17:38:55–17:38:59: 3,439,630 → 1,863,425 B, video copy, speech gate 0, 1 AAC; source absent; test result/job/audio перемещены в Корзину. |
 | VAL-009 | `готово` | S008 | Current-head prompt и оба audio modes проходят UI/unit/integration validation. | Реальный OBS Stop показывает dialog; сохранение source и tracks проверено; отдельный merge fixture даёт одну track; тестовые artifacts очищены. | UI cancel/process/checkbox readback зелёные; E2E preserve и disposable merge зелёные; все test artifacts и diagnostics перемещены в именованный каталог Корзины. |
+| VAL-010 | `готово` | S009, S010 | Long-form regression и A/B на реальном собеседовании проверяют длинную начальную тишину, речь/имена/длинную реплику у прежних границ, no-speech, начало/середину/конец и отсутствие повторов. | Focused/full/race tests зелёные; новый transcript реального файла полнее либо не хуже fixed-chunk v1 на проверяемых участках и содержит финальное прощание. | Real A/B: 38.38 s, 1455 слов против 1381 fixed-v1 и 290 no-timestamps; offset 178.49, 344 monotonic segments, восстановлен выпад вокруг 600 s, убран дубль на 240 s, финал присутствует. |
 
 ## Границы Объема
 | ID | Статус | Источник | Граница | Примечания |
