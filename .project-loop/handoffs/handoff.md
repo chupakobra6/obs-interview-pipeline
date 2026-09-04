@@ -1,65 +1,47 @@
 # Handoff
 
 Проект: obs-interview-pipeline
-Обновлено: 2026-08-02
+Обновлено: 2026-09-04
 
 ## Цель
 
-- После остановки OBS дать выбор для конкретной записи, локально расшифровать её общим Harvest ASR, получить компактный проверенный HEVC и безопасно применить выбранную delete/audio policy.
+- Исправить short-form Telegram Harvest, который принудительно передавал Whisper язык `ru`, не ухудшив русскую речь и не изменив long-form.
 
-## Текущий Шаг
+## Завершённый Шаг
 
-- active step: `STEP-011R`
+- step: `STEP-012A`
 - status: `готово`
-- requirements: `REQ-028..REQ-030`, `VAL-017`
+- requirements: `REQ-031`, `VAL-018`
 
-## Итог Реализации
+## Реализация
 
-- Harvest contract v4 оставляет один публичный profile `adaptive-media-v1`; caller больше не выбирает short/long режим.
-- Router сохраняет прежний `ru + no_timestamps` для обычных Telegram voice, использует timestamped long-form только при длительности от 180 секунд либо leading silence от 10 секунд и штатно пропускает no-speech.
-- Language probe физически извлекает не более 15 секунд WAV. Russian punctuation seed, coverage guard и exact-cycle repetition policy входят в descriptor/cache identity.
-- OBS удалил `--trusted-long-form`, принимает как короткий `transcribed`, так и длинный `coverage-validated` результат одного контракта.
-- Независимый reviewer после двух targeted repairs дал `PASS`, findings отсутствуют.
-
-## Итог Review
-
-- Stale `ASSUME_SPEECH`, `--trusted-long-form` и прежние public profile IDs удалены из production surface; regression tests требуют их отклонять.
-- OBS delete lifecycle теперь сохраняет в manifest v3 device/inode, размер и modification time source; identity повторно проверяется перед публикацией и `unlink`.
-- Retry требует точного совпадения transcript и output media probe с manifest. Replacement source не удаляется; отсутствие source принимается только для `delete_source=true` после повторной проверки опубликованного результата.
-- Crash после успешного `unlink`, но до queue acknowledgement, больше не превращает валидный job в постоянный failure.
-- Repo polish добавил OBS CI badge, актуальную ASR performance секцию, точный delete contract и GitHub topics; Harvest CI получил bounded concurrency, timeout, named steps и checkout без persisted credentials.
-- Session learnings сохранены в behavior tests и одной короткой repo-specific policy Harvest; отдельный исторический документ не создан.
-
-## Архитектура
-
-- Один public profile содержит две внутренние стратегии, потому что A/B доказал: timestamp mode для всех коротких media меняет текст и добавляет 0,7–1,8 секунды.
-- Short: whole-file Silero bounds → прежний `ru + no_timestamps` decode → terminal cleanup.
-- Long: bounded first/last Silero → 1 s lead-in → физический 15 s language probe → selective RU punctuation seed без carry либо EN/auto без prompt → один native timestamped decode → timestamps/tail coverage/exact-loop validation.
-- OBS не дублирует model, Metal, beam, VAD, language, routing, prompt или repetition policy Harvest.
+- Production language и short-form HTTP request переведены на `auto`; short path остался одним быстрым `no_timestamps` request без language probe и prompt.
+- Long-form router, 15-секундный probe, selective Russian punctuation prompt, model и decode settings не менялись.
+- Strategy и language policy переименованы в `auto-language-no-timestamps-v2` и `auto-short-detect-russian-punctuation-long-v2`; descriptor и cache identity теперь отличаются от forced-RU.
+- Public profile заменён на `adaptive-media-v2`; OBS consumer принимает только новый ID, compatibility path не добавлялся.
 
 ## Проверка
 
-- `go test ./internal/processor` после каждого repair cycle — зелёный.
-- `make check` и `go test -race ./...` обоих репозиториев — зелёные после final repair.
-- `staticcheck` и `govulncheck` обоих репозиториев — зелёные; вызываемых уязвимостей 0.
-- Telegram A/B: 42 real media без semantic regression; 6/6 fresh voice exact; short median overhead +0,021 s.
-- Real interview: 1529 words, 199 monotonic segments, tail gap 0,334 s, total 42,30 s; exact transcript SHA совпал с ранее принятым long result.
-- Clean installed production E2E: 15 s leading silence → offset 14,49 s, punctuated RU transcript, `coverage-validated`, gap 0, Metal true; HEVC 1512×982@30 + AAC readback зелёный.
-- Installed `go version -m` показал `vcs.modified=false`; после closure commit установка повторяется из финального чистого HEAD.
-- Disposable E2E source/result перемещены в Корзину; `.processing-*` и фоновые Whisper/processor процессы отсутствуют.
-- Post-push CI implementation commits зелёный: Harvest run `30741633468`, OBS run `30741633525`; final closure commit повторяет те же repository gates.
-- Project Loop validate — зелёный.
-- GitHub CI: OBS `f1c6605` и Harvest `b2fbd80` — зелёные; финальный docs/loop closure проходит отдельный post-push CI gate.
-- Временные benchmark/E2E artifacts отсутствуют; тесты используют `t.TempDir()`.
+- Installed whisper.cpp v1.9.1 source подтвердил request-level `language` и core auto-detection для значения `auto`.
+- Current-head FLEURS, 10 RU: auto и explicit `ru` дали одинаковые WER 0,61%, CER 0,09% и 9/10 exact.
+- Current-head FLEURS, 10 EN: auto и explicit `en` дали одинаковые WER 4,22%, CER 1,76% и 4/10 exact; прежний forced-RU production имел WER 70,46%.
+- Смешанный 25-секундный RU/SQL учебный фрагмент побайтно совпал с forced-RU baseline.
+- Все 20 FLEURS responses вернули contract v4, `adaptive-media-v2`, backend `language=auto`, strategy `auto-language-no-timestamps-v2` и `short-media`.
+- Harvest `make verify`, OBS `make check` и `go test -race ./...` прошли; current-head `make doctor` принял v4/`adaptive-media-v2` и показал готовые ASR/Metal/HEVC dependencies.
 
-## Остаточные Решения
+## Review
 
-- `coverage-validated` не означает WER/CER; он гарантирует structural timestamps и покрытие последней найденной речи.
-- Публичный OBS repository пока без LICENSE. Лицензия не выбрана автоматически, потому что это решение владельца, а не безопасная техническая правка.
+- Self-review проверил minimal diff, old-profile rejection, cache invalidation и отсутствие изменений long-form; findings отсутствуют.
+- Subagent reviewer не запускался: текущий orchestration constraint запрещает delegation без прямого запроса пользователя.
+
+## Остаточные Границы
+
+- Auto-detection выбирает доминирующий язык одного short request; intra-file language switching остаётся вне этого шага.
+- FLEURS — короткий чистый speech corpus; production noise, акценты и код-свитчинг могут давать иное распределение ошибок, но не отменяют устранение forced-RU дефекта.
 
 ## Следующее Действие
 
-- Использовать OBS и Telegram Harvest как обычно; mixed-language routing внутри одной записи остаётся явной отложенной границей.
+- Использовать Telegram Harvest и OBS pipeline как обычно; дополнительной миграции настроек нет.
 
 ## Источники Правды
 
@@ -67,4 +49,4 @@
 - `.project-loop/requirements/checklist.md`
 - `.project-loop/plan/delivery-plan.md`
 - `.project-loop/plan/current-step.md`
-- `.project-loop/evidence/unified-adaptive-asr-benchmark.md`
+- `.project-loop/intake/user-deltas.md`

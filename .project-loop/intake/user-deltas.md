@@ -311,3 +311,29 @@ ID источника: `S015`
 - [x] реализация и A/B завершены
 - [x] reviewer проверил
 - [x] handoff и operational closure обновлены
+
+### Auto-language для short-form Harvest
+
+ID источника: `S016`
+
+Исходный ввод:
+
+```text
+Тест обнаружил отдельную проблему Harvest: short-form route всегда передаёт Whisper язык `ru`.
+
+давай исправим эту проблему и чтобы без регрессии
+```
+
+Нормализация:
+- [x] short-form отправляет один `no_timestamps` request с `language=auto`, без отдельного probe и prompt;
+- [x] long-form language probe, selective Russian prompt, routing thresholds, model и decode settings не меняются;
+- [x] descriptor/cache identity отличает auto-language от forced-RU;
+- [x] public profile поднят до `adaptive-media-v2`, OBS consumer обновлён атомарно без compatibility path;
+- [x] current-head RU/EN ground-truth A/B и mixed technical sample подтверждают исправление без регрессии.
+
+Маршрутизация:
+- [x] исходный ввод сохранён здесь;
+- [x] карта источников, чеклист, план и текущий шаг обновлены;
+- [x] реализация, A/B и межрепозиторная проверка завершены;
+- [x] self-review и automated regression gates завершены; subagent reviewer не запускался из-за текущего orchestration constraint;
+- [x] handoff обновлён.

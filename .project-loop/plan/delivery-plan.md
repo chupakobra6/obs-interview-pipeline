@@ -1,7 +1,7 @@
 # План Поставки
 
 Проект: obs-interview-pipeline
-Обновлено: 2026-08-02
+Обновлено: 2026-09-04
 
 ## Этапы
 | Шаг | Статус | ID требований | Цель | Ревью | Проверка |
@@ -37,6 +37,7 @@
 | STEP-011A | `готово` | REQ-028..REQ-030, CON-006, VAL-016 | Спроектировать единый adaptive profile и сравнить routing/quality/runtime на Telegram и OBS corpus до удаления старого контракта. | Проверить route invariants, cache identity, Silero/probe стоимость, repetition false positives и migration surface. | 42-file corpus, fresh 6-file A/B, silence 15/30/180, real interview и reviewer согласовали router 180 s / 10 s. |
 | STEP-011B | `готово` | REQ-028..REQ-030, VAL-016 | Реализовать выбранный единый профиль в Harvest и синхронно обновить OBS consumer. | Проверить один source of truth, отсутствие compatibility paths и deterministic diagnostics. | Focused/full/race/audit, corpus A/B и независимый final review зелёные. |
 | STEP-011R | `готово` | REQ-028..REQ-030, VAL-017 | Провести cleanup, чистую установку, integrated E2E, push и CI closure. | Проверить installed provenance, contract v4, runtime residue и upstream CI. | Installed E2E/doctor/provenance, cleanup и CI обоих implementation commits зелёные; closure commit повторяет gates. |
+| STEP-012A | `готово` | REQ-031, VAL-018 | Убрать forced-RU из short-form, версионировать профиль и атомарно обновить OBS consumer. | Проверить HTTP request, descriptor/cache identity, отклонение old profile, RU/EN WER/CER и mixed technical speech. | Focused/full/race/audit, 20-file FLEURS A/B, exact mixed-sample comparison и OBS→Harvest doctor зелёные. |
 
 ## Примечания По Порядку
 - Шаги достаточно маленькие для цикла: реализация, ревью, исправление, проверка, коммит, handoff.

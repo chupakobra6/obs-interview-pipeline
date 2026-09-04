@@ -1,7 +1,7 @@
 # Карта Источников
 
 Проект: obs-interview-pipeline
-Обновлено: 2026-08-02
+Обновлено: 2026-09-04
 
 ## Приоритет Источников
 1. Текущая прямая инструкция Игоря.
@@ -30,6 +30,7 @@
 | S013 | user + experiment report | 2026-08-02 | `.project-loop/intake/raw/adaptive-multilingual-asr-selection.md`, installed `whisper.cpp@v1.9.1`, multilingual benchmark corpus | принято, завершено | Сравнение 12 вариантов выбрало detect → selective RU prompt; contract v3 оставляет два публичных профиля и один источник ASR policy в Harvest. |
 | S014 | user delta | 2026-08-02 | `.project-loop/intake/user-deltas.md` | принято | Провести повторный tooling-review, repo-polish и session-learnings после публикации обоих репозиториев; исправить безопасные gaps, сохранить только устойчивые правила, проверить, закоммитить и запушить результат. |
 | S015 | user delta + local A/B | 2026-08-02 | `.project-loop/intake/user-deltas.md`, Telegram ASR corpus, real OBS interview | принято, реализация завершена | Исправить найденные ASR-хвосты и при доказанной безопасности заменить short/long public profiles одним адаптивным профилем для Telegram и OBS; mixed-language внутри записи отложен. |
+| S016 | user delta + ground-truth A/B | 2026-09-04 | `.project-loop/intake/user-deltas.md`, Telegram Harvest FLEURS RU/EN corpus | принято, реализация завершена | Убрать принудительный `ru` из short-form, сохранить быстрый decode и доказать отсутствие регрессии на русской речи; синхронно обновить OBS contract. |
 
 ## Конфликты
 | Источники | Решение | Дата |

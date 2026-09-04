@@ -165,14 +165,15 @@ func TestDecodeHarvestResponseRejectsEmptyInterviewTranscript(t *testing.T) {
 }
 
 func TestValidateRuntimeCheckResponseUsesPublicContract(t *testing.T) {
-	payload := []byte(`{"contract_version":4,"status":"ok","profile_id":"adaptive-media-v1","validation_status":"runtime-ready","backend":{"arbitrary":true}}`)
+	payload := []byte(`{"contract_version":4,"status":"ok","profile_id":"adaptive-media-v2","validation_status":"runtime-ready","backend":{"arbitrary":true}}`)
 	if err := ValidateRuntimeCheckResponse(payload); err != nil {
 		t.Fatal(err)
 	}
 	for _, invalid := range [][]byte{
-		[]byte(`{"contract_version":3,"status":"ok","profile_id":"adaptive-media-v1","validation_status":"runtime-ready"}`),
+		[]byte(`{"contract_version":3,"status":"ok","profile_id":"adaptive-media-v2","validation_status":"runtime-ready"}`),
+		[]byte(`{"contract_version":4,"status":"ok","profile_id":"adaptive-media-v1","validation_status":"runtime-ready"}`),
 		[]byte(`{"contract_version":4,"status":"ok","profile_id":"legacy-profile","validation_status":"runtime-ready"}`),
-		[]byte(`{"contract_version":4,"status":"ok","profile_id":"adaptive-media-v1","validation_status":"coverage-validated"}`),
+		[]byte(`{"contract_version":4,"status":"ok","profile_id":"adaptive-media-v2","validation_status":"coverage-validated"}`),
 	} {
 		if err := ValidateRuntimeCheckResponse(invalid); err == nil {
 			t.Fatalf("invalid check response was accepted: %s", invalid)

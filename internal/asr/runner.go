@@ -17,7 +17,7 @@ import (
 
 const (
 	harvestContractVersion        = 4
-	harvestProfileID              = "adaptive-media-v1"
+	harvestProfileID              = "adaptive-media-v2"
 	harvestValidationRuntimeReady = "runtime-ready"
 	harvestValidationTranscribed  = "transcribed"
 	harvestValidationCoverage     = "coverage-validated"

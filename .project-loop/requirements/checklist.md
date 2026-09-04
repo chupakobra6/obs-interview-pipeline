@@ -1,7 +1,7 @@
 # Чеклист Требований
 
 Проект: obs-interview-pipeline
-Обновлено: 2026-08-02
+Обновлено: 2026-09-04
 
 ## Значения Статусов
 Используй `кандидат`, `принято`, `в работе`, `готово`, `отложено`, `заблокировано` или `отклонено`.
@@ -39,6 +39,7 @@
 | REQ-028 | `готово` | S015 | Telegram Harvest предоставляет один публичный адаптивный ASR-профиль для Telegram и OBS, сохраняя внутри только доказанно необходимые short/long стратегии. | Обычные короткие Telegram-медиа выбирают быстрый short decode; длинные либо имеющие большое leading silence автоматически получают bounded trim, timestamped decode и coverage validation; caller не выбирает режим вручную. | `adaptive-media-v1`; 42-file corpus без quality regression; leading-silence и interview A/B; independent review PASS. |
 | REQ-029 | `готово` | S015 | Language probe физически ограничен 15 секундами, а repetition diagnostics точно отражают реализованные проверки без ложного заявления о полной лексической валидации. | Multipart probe содержит не более 15 секунд PCM; extreme cyclic output определяется консервативно; нормальные повторы не переписываются и не отклоняются. | Physical probe regression; real interview probe 0,66 s; descriptor-owned exact-cycle thresholds/cache tests; four natural repeats accepted. |
 | REQ-030 | `готово` | S015 | OBS использует тот же единый ASR-контракт без отдельного флага/профиля и без дублирования model, language, VAD или decode settings. | Старые public profile IDs и `--trusted-long-form` удалены, contract обновлён атомарно в обоих репозиториях, installed doctor подтверждает чистый current HEAD. | Installed doctor v4/adaptive-media-v1 и production E2E через clean binaries зелёные; OBS caller передаёт только public local command contract. |
+| REQ-031 | `готово` | S016 | Short-form Harvest определяет язык автоматически вместо принудительного `ru`, сохраняя `no_timestamps`, routing и long-form language probe/prompt policy. | HTTP regression требует `language=auto` без prompt/probe/timestamps; descriptor и cache identity отличаются от forced-RU; FLEURS RU не хуже baseline, EN возвращается к explicit-language baseline; OBS принимает только `adaptive-media-v2`. | 10 RU: WER 0,61%, CER 0,09%, 9/10 exact для auto и explicit `ru`; 10 EN: WER 4,22%, CER 1,76%, 4/10 exact для auto и explicit `en`; mixed RU/SQL 25 s exact-identical baseline; full/race/audit и doctor зелёные. |
 
 ## Ограничения
 | ID | Статус | Источник | Ограничение | Доказательства |
@@ -70,6 +71,7 @@
 | VAL-015 | `готово` | S014 | Финальный review/polish проходит focused/full/race проверки, Project Loop validation, repo/runtime/process inventory и независимую GitHub CI проверку после push. | Каждый затронутый репозиторий имеет clean focused commit; upstream совпадает; CI зелёный; временные review artifacts отсутствуют. | Focused/full/race и оба static/vulnerability audits зелёные; installed doctor contract v3 зелёный; OBS `f1c6605` и Harvest `b2fbd80` прошли GitHub CI; final closure CI проверяется после docs-only push. |
 | VAL-016 | `готово` | S015 | Единый профиль проходит same-corpus A/B на реальных коротких Telegram-медиа, leading-silence Telegram regression и полном реальном интервью. | Short outputs и semantic content не хуже baseline, short overhead в бюджете; long cases сохраняют начало/середину/конец, monotonic timestamps, trailing coverage, пунктуацию и отсутствие extreme repetition. | 42-file quality metrics identical; 6/6 fresh exact short; 15/30/180 s leading-silence green; interview 1529 words/199 segments/gap 0,334 s/42,30 s. |
 | VAL-017 | `готово` | S015 | Оба репозитория проходят focused/full/race и current-head integrated OBS→Harvest run, затем installed provenance и CI проверяются после push. | Contract/cache identity меняются атомарно; temporary media/processes отсутствуют; clean commits совпадают с origin и CI зелёный. | Full/race/audit зелёные; installed E2E: 15 s silence → offset 14,49 s, coverage gap 0, punctuated RU transcript, Metal, HEVC/AAC readback; artifacts очищены; Harvest CI 30741633468 и OBS CI 30741633525 зелёные. |
+| VAL-018 | `готово` | S016 | Current-head short-form проходит RU/EN ground-truth A/B, смешанный учебный sample, полные проверки обоих репозиториев и OBS→Harvest doctor. | Все 20 contract responses содержат v4/`adaptive-media-v2`, backend `language=auto`, strategy `auto-language-no-timestamps-v2`; RU metrics равны explicit `ru`, EN metrics равны explicit `en`; mixed sample побайтно совпадает. | Harvest `make verify`, OBS `make check` и `go test -race ./...`, current-head doctor, FLEURS metrics и installed whisper.cpp source-path inspection зелёные. |
 
 ## Границы Объема
 | ID | Статус | Источник | Граница | Примечания |
