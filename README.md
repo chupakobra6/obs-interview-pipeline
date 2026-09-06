@@ -101,11 +101,19 @@ bin/obs-interview-processor enqueue --delete-source=false --audio-mode=preserve 
 - Если output не меньше source, проверка не проходит и исходник сохраняется. На прямом HEVC fast path уменьшение даёт перекодирование каждой AAC-дорожки со 160 до target 96 Кбит/с; для тишины фактический средний bitrate может быть заметно ниже target.
 - Повтор после сбоя удаления заново проверяет уже опубликованные результаты и только затем повторяет удаление source.
 
+## Границы ASR
+
+`coverage-validated` подтверждает структуру timestamps и покрытие хвоста, но не точность каждого слова или WER/CER. Определяется доминирующий язык; переключение языков внутри одной long-form записи остаётся отложенным. Short-form использует `language=auto` без отдельного probe, prompt или timestamps.
+
+Модель, Metal и быстрые decode settings принадлежат Harvest. При сравнении long-form алгоритмов медианное время не должно ухудшаться более чем на 10% без доказанного выигрыша качества и отдельного обоснования. Проверять RU/EN, слабую речь, leading silence, no-speech, начало/середину/конец, повторы и prompt leakage; реальная запись с silver reference не заменяет ground truth.
+
+[Проверка унификации ASR](docs/benchmarks/unified-adaptive-asr-benchmark.md) сохраняет доказательства выбора одного публичного профиля. Локальный ASR-вход не выполняет Telegram RPC и не меняет Telegram state.
+
 ## Производительность ASR
 
 На реальном интервью исходный файл длительностью `971,97 с` содержал `178,49 с` pre-roll; после trimming Whisper декодировал `793,41 с` аудио. Свежий production-прогон занял `47,60 с`: это `20,42× realtime` относительно всего файла или консервативные `16,67×` относительно реально декодированной части. Языковой probe занял `0,89 с`, long-form preparation — `1,67 с`, хвост ASR отстал от последней VAD-речи только на `0,33 с`.
 
-На английском ground-truth sample длительностью `204,78 с` тот же профиль закончил за `9,91 с` (`20,66× realtime`, WER `0,96%`). Практический диапазон на текущем Mac — примерно `15–21× realtime` в зависимости от Metal-нагрузки. Полная матрица вариантов и оговорки по silver reference находятся в [adaptive-long-form-benchmark.md](.project-loop/evidence/adaptive-long-form-benchmark.md).
+На английском ground-truth sample длительностью `204,78 с` тот же профиль закончил за `9,91 с` (`20,66× realtime`, WER `0,96%`). Практический диапазон на текущем Mac — примерно `15–21× realtime` в зависимости от Metal-нагрузки. Полная матрица вариантов и оговорки по silver reference находятся в [adaptive-long-form-benchmark.md](docs/benchmarks/adaptive-long-form-benchmark.md).
 
 Это скорость ASR. Полный job также включает AAC/HEVC обработку и публикацию; ASR и media pipeline выполняются параллельно. Для готового OBS HEVC video stream копируется, поэтому длительное повторное video encode отсутствует.
 
