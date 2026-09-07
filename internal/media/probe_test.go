@@ -45,3 +45,13 @@ func TestValidateCompressedAcceptsLowerAverageAACBitrateForSilence(t *testing.T)
 		t.Fatalf("ValidateCompressed() error = %v", err)
 	}
 }
+
+func TestValidateSizeLimit(t *testing.T) {
+	source := Probe{Format: Format{Size: "1000"}}
+	if err := ValidateSizeLimit(source, Probe{Format: Format{Size: "800"}}, 80); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateSizeLimit(source, Probe{Format: Format{Size: "801"}}, 80); err == nil {
+		t.Fatal("accepted output above configured size bound")
+	}
+}

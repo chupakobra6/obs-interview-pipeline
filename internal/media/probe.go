@@ -162,3 +162,14 @@ func ValidateCompressed(source, output Probe, width, height, fps, audioBitrateKb
 	}
 	return nil
 }
+
+func ValidateSizeLimit(source, output Probe, maximumPercent int) error {
+	if source.SizeBytes() <= 0 || output.SizeBytes() <= 0 {
+		return fmt.Errorf("source and output sizes must be positive")
+	}
+	maximumBytes := source.SizeBytes() * int64(maximumPercent) / 100
+	if output.SizeBytes() > maximumBytes {
+		return fmt.Errorf("compressed output exceeds %d%% size limit: %d > %d bytes", maximumPercent, output.SizeBytes(), maximumBytes)
+	}
+	return nil
+}

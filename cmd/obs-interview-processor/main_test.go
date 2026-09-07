@@ -77,3 +77,19 @@ func TestLaunchAgentUsesInteractiveProcessType(t *testing.T) {
 		t.Fatalf("LaunchAgent still requests background throttling: %s", plist)
 	}
 }
+
+func TestSobesTechLaunchAgentWatchesRecordingsWithFallback(t *testing.T) {
+	cfg := config.Default("/Users/igor")
+	plist := sobesTechLaunchAgentPlist("/tmp/processor", "/tmp/config.json", cfg)
+	for _, expected := range []string{
+		"<string>import-sobestech</string>",
+		"<key>WatchPaths</key>",
+		xmlEscape(cfg.SobesTechInputDir),
+		"<key>StartInterval</key>\n  <integer>30</integer>",
+		"<key>ProcessType</key>\n  <string>Interactive</string>",
+	} {
+		if !strings.Contains(plist, expected) {
+			t.Fatalf("SobesTech LaunchAgent missing %q: %s", expected, plist)
+		}
+	}
+}

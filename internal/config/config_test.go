@@ -34,10 +34,10 @@ func TestLoadForInstallMigratesLegacyWhisperConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Version != CurrentVersion || cfg.VideoQuality != 55 {
+	if cfg.Version != CurrentVersion {
 		t.Fatalf("migration lost settings: %+v", cfg)
 	}
-	if cfg.AudioBitrateKbps != 96 {
+	if cfg.AudioBitrateKbps != 96 || cfg.MaxOutputSizePercent != 80 {
 		t.Fatalf("migration did not apply audio bitrate: %+v", cfg)
 	}
 	if cfg.PromptCommand != filepath.Join(dir, "Library", "Application Support", AppDirName, "OBS Interview Prompt.app", "Contents", "MacOS", "obs-interview-prompt") {
@@ -45,6 +45,9 @@ func TestLoadForInstallMigratesLegacyWhisperConfig(t *testing.T) {
 	}
 	if cfg.TelegramHarvestRoot != filepath.Join(dir, "projects", "telegram-harvest") {
 		t.Fatalf("unexpected Harvest root: %s", cfg.TelegramHarvestRoot)
+	}
+	if cfg.SobesTechInputDir != filepath.Join(dir, "Library", "Application Support", "com.pers0na2.identityproxy", "interview_recordings") || cfg.SobesTechSettleSeconds != DefaultSobesTechSettleSecs {
+		t.Fatalf("migration did not apply SobesTech defaults: %+v", cfg)
 	}
 	if err := Write(path, cfg); err != nil {
 		t.Fatal(err)
@@ -55,6 +58,9 @@ func TestLoadForInstallMigratesLegacyWhisperConfig(t *testing.T) {
 	}
 	if strings.Contains(string(payload), "whisper_server_command") {
 		t.Fatalf("legacy key survived migration:\n%s", payload)
+	}
+	if strings.Contains(string(payload), "video_quality") {
+		t.Fatalf("replaced quality setting survived migration:\n%s", payload)
 	}
 	if _, err := Load(path); err != nil {
 		t.Fatalf("load migrated config: %v", err)

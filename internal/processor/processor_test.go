@@ -377,7 +377,7 @@ func testConfig(dir string) config.Config {
 		OutputWidth:            1512,
 		OutputHeight:           982,
 		OutputFPS:              30,
-		VideoQuality:           55,
+		MaxOutputSizePercent:   80,
 		AudioBitrateKbps:       96,
 		DeleteSourceOnSuccess:  true,
 	}
@@ -443,7 +443,7 @@ func TestFFmpegCommandAddsOnlyNecessaryFallbackFilters(t *testing.T) {
 	source := media.Probe{Streams: []media.Stream{
 		{CodecType: "video", CodecName: "h264", Width: 3024, Height: 1964, AvgFrameRate: "30/1"},
 		{CodecType: "audio", CodecName: "aac"},
-	}}
+	}, Format: media.Format{Duration: "60", Size: "6000000"}}
 	compression, args, err := (FFmpegCompressor{Config: cfg}).command("input.mp4", "output.mp4", source, policy.Options{AudioMode: policy.AudioPreserve})
 	if err != nil {
 		t.Fatal(err)
@@ -452,7 +452,7 @@ func TestFFmpegCommandAddsOnlyNecessaryFallbackFilters(t *testing.T) {
 		t.Fatalf("unexpected compression: %+v", compression)
 	}
 	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "-vf scale=1512:982:flags=lanczos") || !strings.Contains(joined, "-realtime 1 -prio_speed 1") || strings.Contains(joined, "fps=30") {
+	if !strings.Contains(joined, "-vf scale=1512:982:flags=lanczos") || !strings.Contains(joined, "-b:v 528k -maxrate 528k -bufsize 1056k") || !strings.Contains(joined, "-realtime 1 -prio_speed 1") || strings.Contains(joined, "fps=30") || strings.Contains(joined, "-q:v") {
 		t.Fatalf("unexpected filters: %q", joined)
 	}
 }

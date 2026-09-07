@@ -35,6 +35,7 @@ type Compressor interface {
 type Compression struct {
 	VideoMode         string   `json:"video_mode"`
 	VideoFilters      []string `json:"video_filters,omitempty"`
+	VideoBitrateKbps  int      `json:"video_bitrate_kbps,omitempty"`
 	AudioMode         string   `json:"audio_mode"`
 	SourceAudioTracks int      `json:"source_audio_tracks"`
 	OutputAudioTracks int      `json:"output_audio_tracks"`
@@ -116,8 +117,16 @@ func (c FFmpegCompressor) command(inputPath, outputPath string, source media.Pro
 	if copyVideo {
 		args = append(args, "-c:v", "copy", "-tag:v", "hvc1")
 	} else {
+		videoBitrateKbps, err := c.videoBitrateKbps(source, compression.OutputAudioTracks)
+		if err != nil {
+			return Compression{}, nil, err
+		}
+		compression.VideoBitrateKbps = videoBitrateKbps
 		args = append(args,
-			"-c:v", "hevc_videotoolbox", "-tag:v", "hvc1", "-q:v", fmt.Sprintf("%d", c.Config.VideoQuality),
+			"-c:v", "hevc_videotoolbox", "-tag:v", "hvc1",
+			"-b:v", fmt.Sprintf("%dk", videoBitrateKbps),
+			"-maxrate", fmt.Sprintf("%dk", videoBitrateKbps),
+			"-bufsize", fmt.Sprintf("%dk", videoBitrateKbps*2),
 			"-realtime", "1", "-prio_speed", "1",
 		)
 	}
@@ -129,6 +138,22 @@ func (c FFmpegCompressor) command(inputPath, outputPath string, source media.Pro
 		outputPath,
 	)
 	return compression, args, nil
+}
+
+func (c FFmpegCompressor) videoBitrateKbps(source media.Probe, outputAudioTracks int) (int, error) {
+	duration := source.DurationSeconds()
+	if duration <= 0 || source.SizeBytes() <= 0 {
+		return 0, fmt.Errorf("source size and duration are required for bounded compression")
+	}
+	// Reserve two percentage points for MP4 muxing variance so the configured
+	// maximum is a practical upper bound instead of an optimistic media target.
+	mediaPercent := c.Config.MaxOutputSizePercent - 2
+	totalTargetKbps := int(float64(source.SizeBytes()*8) / duration / 1000 * float64(mediaPercent) / 100)
+	videoTargetKbps := totalTargetKbps - outputAudioTracks*c.Config.AudioBitrateKbps
+	if videoTargetKbps < 128 {
+		return 0, fmt.Errorf("source bitrate is too low for bounded HEVC compression")
+	}
+	return videoTargetKbps, nil
 }
 
 type ProbeFunc func(context.Context, string, string) (media.Probe, error)
@@ -176,11 +201,11 @@ type sourceIdentity struct {
 }
 
 type compressionSettings struct {
-	OutputWidth      int `json:"output_width"`
-	OutputHeight     int `json:"output_height"`
-	OutputFPS        int `json:"output_fps"`
-	VideoQuality     int `json:"video_quality"`
-	AudioBitrateKbps int `json:"audio_bitrate_kbps"`
+	OutputWidth          int `json:"output_width"`
+	OutputHeight         int `json:"output_height"`
+	OutputFPS            int `json:"output_fps"`
+	MaxOutputSizePercent int `json:"max_output_size_percent"`
+	AudioBitrateKbps     int `json:"audio_bitrate_kbps"`
 }
 
 type compressionCheckpoint struct {
@@ -393,6 +418,9 @@ func (p Pipeline) ensureCompression(
 	if err := media.ValidateCompressed(sourceProbe, outputProbe, p.Config.OutputWidth, p.Config.OutputHeight, p.Config.OutputFPS, p.Config.AudioBitrateKbps, compression.OutputAudioTracks); err != nil {
 		return Compression{}, media.Probe{}, fmt.Errorf("validate compressed output: %w", err)
 	}
+	if err := media.ValidateSizeLimit(sourceProbe, outputProbe, p.Config.MaxOutputSizePercent); err != nil {
+		return Compression{}, media.Probe{}, fmt.Errorf("validate compressed output: %w", err)
+	}
 	checkpoint := compressionCheckpoint{
 		Version:        compressionCheckpointVersion,
 		SourcePath:     inputPath,
@@ -459,16 +487,19 @@ func (p Pipeline) validCompressionCheckpoint(
 	if err := media.ValidateCompressed(sourceProbe, actualOutput, p.Config.OutputWidth, p.Config.OutputHeight, p.Config.OutputFPS, p.Config.AudioBitrateKbps, checkpoint.Compression.OutputAudioTracks); err != nil {
 		return compressionCheckpoint{}, false
 	}
+	if err := media.ValidateSizeLimit(sourceProbe, actualOutput, p.Config.MaxOutputSizePercent); err != nil {
+		return compressionCheckpoint{}, false
+	}
 	return checkpoint, true
 }
 
 func (p Pipeline) compressionSettings() compressionSettings {
 	return compressionSettings{
-		OutputWidth:      p.Config.OutputWidth,
-		OutputHeight:     p.Config.OutputHeight,
-		OutputFPS:        p.Config.OutputFPS,
-		VideoQuality:     p.Config.VideoQuality,
-		AudioBitrateKbps: p.Config.AudioBitrateKbps,
+		OutputWidth:          p.Config.OutputWidth,
+		OutputHeight:         p.Config.OutputHeight,
+		OutputFPS:            p.Config.OutputFPS,
+		MaxOutputSizePercent: p.Config.MaxOutputSizePercent,
+		AudioBitrateKbps:     p.Config.AudioBitrateKbps,
 	}
 }
 
@@ -527,6 +558,9 @@ func (p Pipeline) finishExisting(ctx context.Context, inputPath, finalDir, video
 		if err := media.ValidateCompressed(saved.SourceProbe, currentOutput, p.Config.OutputWidth, p.Config.OutputHeight, p.Config.OutputFPS, p.Config.AudioBitrateKbps, saved.Compression.OutputAudioTracks); err != nil {
 			return Result{}, fmt.Errorf("validate existing compressed output after source deletion: %w", err)
 		}
+		if err := media.ValidateSizeLimit(saved.SourceProbe, currentOutput, p.Config.MaxOutputSizePercent); err != nil {
+			return Result{}, fmt.Errorf("validate existing compressed output after source deletion: %w", err)
+		}
 		return resultFromManifest(inputPath, finalDir, videoPath, transcriptPath, manifestPath, saved, currentOutput), nil
 	}
 	if identityErr != nil {
@@ -540,6 +574,9 @@ func (p Pipeline) finishExisting(ctx context.Context, inputPath, finalDir, video
 		return Result{}, fmt.Errorf("probe source before retry deletion: %w", err)
 	}
 	if err := media.ValidateCompressed(currentSource, currentOutput, p.Config.OutputWidth, p.Config.OutputHeight, p.Config.OutputFPS, p.Config.AudioBitrateKbps, saved.Compression.OutputAudioTracks); err != nil {
+		return Result{}, fmt.Errorf("validate existing compressed output: %w", err)
+	}
+	if err := media.ValidateSizeLimit(currentSource, currentOutput, p.Config.MaxOutputSizePercent); err != nil {
 		return Result{}, fmt.Errorf("validate existing compressed output: %w", err)
 	}
 	if options.DeleteSource {

@@ -21,6 +21,7 @@ import (
 	"github.com/chupakobra6/obs-interview-pipeline/internal/policy"
 	"github.com/chupakobra6/obs-interview-pipeline/internal/processor"
 	jobqueue "github.com/chupakobra6/obs-interview-pipeline/internal/queue"
+	"github.com/chupakobra6/obs-interview-pipeline/internal/sobestech"
 )
 
 const executableName = "obs-interview-processor"
@@ -75,6 +76,27 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		printJSON(stdout, job)
+		return 0
+	case "import-sobestech":
+		cfg, rest, err := loadConfigArgs(home, "import-sobestech", args[1:])
+		if err != nil || len(rest) != 0 {
+			if err == nil {
+				err = fmt.Errorf("import-sobestech takes no positional arguments")
+			}
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
+		report, err := sobestech.New(cfg).Import(ctx)
+		if report.Imported > 0 || report.Errors > 0 || len(report.Items) > 0 {
+			printJSON(stdout, report)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "import SobesTech recordings: %v\n", err)
+			if notifyErr := notify(cfg, "Ошибка импорта SobesTech", err.Error(), cfg.SobesTechInputDir); notifyErr != nil {
+				fmt.Fprintf(stderr, "SobesTech import notification failed: %v\n", notifyErr)
+			}
+			return 1
+		}
 		return 0
 	case "prompt":
 		cfg, cfgPath, rest, err := loadConfigPathArgs(home, "prompt", args[1:])
@@ -179,7 +201,7 @@ func install(home string, stdout io.Writer) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("existing config is invalid: %w", err)
 	}
-	for _, dir := range []string{cfg.StateDir, cfg.QueueDir(), cfg.DoneDir(), cfg.FailedDir(), cfg.LogsDir(), cfg.WorkDir(), cfg.OutputDir} {
+	for _, dir := range []string{cfg.StateDir, cfg.QueueDir(), cfg.DoneDir(), cfg.FailedDir(), cfg.LogsDir(), cfg.WorkDir(), cfg.SobesTechReceiptsDir(), cfg.OutputDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}
@@ -214,17 +236,28 @@ func install(home string, stdout io.Writer) error {
 	}
 
 	plistPath := filepath.Join(home, "Library", "LaunchAgents", config.LaunchAgentLabel+".plist")
-	plist := launchAgentPlist(installedBin, cfgPath, cfg)
-	if err := writeAtomic(plistPath, []byte(plist), 0o600); err != nil {
-		return fmt.Errorf("install LaunchAgent: %w", err)
+	if err := writeAtomic(plistPath, []byte(launchAgentPlist(installedBin, cfgPath, cfg)), 0o600); err != nil {
+		return fmt.Errorf("install worker LaunchAgent: %w", err)
+	}
+	importerPlistPath := filepath.Join(home, "Library", "LaunchAgents", config.SobesTechLaunchAgentLabel+".plist")
+	if err := writeAtomic(importerPlistPath, []byte(sobesTechLaunchAgentPlist(installedBin, cfgPath, cfg)), 0o600); err != nil {
+		return fmt.Errorf("install SobesTech LaunchAgent: %w", err)
 	}
 	domain := "gui/" + strconv.Itoa(os.Getuid())
-	_ = exec.Command("/bin/launchctl", "bootout", domain+"/"+config.LaunchAgentLabel).Run()
-	if output, err := exec.Command("/bin/launchctl", "bootstrap", domain, plistPath).CombinedOutput(); err != nil {
-		return fmt.Errorf("load LaunchAgent: %w: %s", err, strings.TrimSpace(string(output)))
+	for _, agent := range []struct {
+		label string
+		path  string
+	}{
+		{label: config.LaunchAgentLabel, path: plistPath},
+		{label: config.SobesTechLaunchAgentLabel, path: importerPlistPath},
+	} {
+		_ = exec.Command("/bin/launchctl", "bootout", domain+"/"+agent.label).Run()
+		if output, err := exec.Command("/bin/launchctl", "bootstrap", domain, agent.path).CombinedOutput(); err != nil {
+			return fmt.Errorf("load %s LaunchAgent: %w: %s", agent.label, err, strings.TrimSpace(string(output)))
+		}
+		_ = exec.Command("/bin/launchctl", "enable", domain+"/"+agent.label).Run()
 	}
-	_ = exec.Command("/bin/launchctl", "enable", domain+"/"+config.LaunchAgentLabel).Run()
-	fmt.Fprintf(stdout, "installed binary: %s\nconfig: %s\nOBS hook: %s\nLaunchAgent: %s\n", installedBin, cfgPath, luaPath, plistPath)
+	fmt.Fprintf(stdout, "installed binary: %s\nconfig: %s\nOBS hook: %s\nworker LaunchAgent: %s\nSobesTech LaunchAgent: %s\n", installedBin, cfgPath, luaPath, plistPath, importerPlistPath)
 	return nil
 }
 
@@ -253,6 +286,8 @@ func doctor(ctx context.Context, cfg config.Config, stdout io.Writer) error {
 	}
 	rootInfo, rootErr := os.Stat(cfg.TelegramHarvestRoot)
 	checks = append(checks, check{Name: "telegram-harvest-root", OK: rootErr == nil && rootInfo.IsDir(), Detail: cfg.TelegramHarvestRoot})
+	sobesTechInfo, sobesTechErr := os.Stat(cfg.SobesTechInputDir)
+	checks = append(checks, check{Name: "sobestech-recordings-root", OK: sobesTechErr == nil && sobesTechInfo.IsDir(), Detail: cfg.SobesTechInputDir})
 	notifierApp := applicationPath(cfg.NotifierCommand)
 	signOutput, signErr := exec.CommandContext(ctx, "/usr/bin/codesign", "--verify", "--deep", "--strict", notifierApp).CombinedOutput()
 	checks = append(checks, check{Name: "notifier-signature", OK: signErr == nil, Detail: oneLineDetail(string(signOutput))})
@@ -274,6 +309,9 @@ func doctor(ctx context.Context, cfg config.Config, stdout io.Writer) error {
 	domain := fmt.Sprintf("gui/%d/%s", os.Getuid(), config.LaunchAgentLabel)
 	launchOutput, launchErr := exec.CommandContext(ctx, "/bin/launchctl", "print", domain).CombinedOutput()
 	checks = append(checks, check{Name: "launch-agent", OK: launchErr == nil, Detail: firstLine(string(launchOutput))})
+	importerDomain := fmt.Sprintf("gui/%d/%s", os.Getuid(), config.SobesTechLaunchAgentLabel)
+	importerOutput, importerErr := exec.CommandContext(ctx, "/bin/launchctl", "print", importerDomain).CombinedOutput()
+	checks = append(checks, check{Name: "sobestech-launch-agent", OK: importerErr == nil, Detail: firstLine(string(importerOutput))})
 	allOK := true
 	for _, item := range checks {
 		allOK = allOK && item.OK
@@ -511,6 +549,37 @@ func launchAgentPlist(binary, cfgPath string, cfg config.Config) string {
 `, xmlEscape(config.LaunchAgentLabel), xmlEscape(binary), xmlEscape(cfgPath), xmlEscape(cfg.QueueDir()), xmlEscape(filepath.Join(cfg.LogsDir(), "processor.log")), xmlEscape(filepath.Join(cfg.LogsDir(), "processor-error.log")))
 }
 
+func sobesTechLaunchAgentPlist(binary, cfgPath string, cfg config.Config) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>%s</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>%s</string>
+    <string>import-sobestech</string>
+    <string>--config</string>
+    <string>%s</string>
+  </array>
+  <key>WatchPaths</key>
+  <array><string>%s</string></array>
+  <key>StartInterval</key>
+  <integer>30</integer>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>LowPriorityIO</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>%s</string>
+  <key>StandardErrorPath</key>
+  <string>%s</string>
+</dict>
+</plist>
+`, xmlEscape(config.SobesTechLaunchAgentLabel), xmlEscape(binary), xmlEscape(cfgPath), xmlEscape(cfg.SobesTechInputDir), xmlEscape(filepath.Join(cfg.LogsDir(), "sobestech-importer.log")), xmlEscape(filepath.Join(cfg.LogsDir(), "sobestech-importer-error.log")))
+}
+
 func copyExecutable(source, destination string) error {
 	input, err := os.Open(source)
 	if err != nil {
@@ -576,7 +645,7 @@ func writeAtomic(path string, payload []byte, mode os.FileMode) error {
 }
 
 func usage(out io.Writer) {
-	fmt.Fprintln(out, "usage: obs-interview-processor <install|doctor|prompt|enqueue|run-queue|process> [--config path] [--delete-source bool] [--audio-mode preserve|merge] [recording]")
+	fmt.Fprintln(out, "usage: obs-interview-processor <install|doctor|prompt|enqueue|import-sobestech|run-queue|process> [--config path] [--delete-source bool] [--audio-mode preserve|merge] [recording]")
 }
 
 func printJSON(out io.Writer, value any) {

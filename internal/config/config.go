@@ -10,10 +10,12 @@ import (
 )
 
 const (
-	CurrentVersion   = 5
-	AppDirName       = "obs-interview-pipeline"
-	ConfigFileName   = "config.json"
-	LaunchAgentLabel = "com.igor.obs-interview-processor"
+	CurrentVersion             = 6
+	AppDirName                 = "obs-interview-pipeline"
+	ConfigFileName             = "config.json"
+	LaunchAgentLabel           = "com.igor.obs-interview-processor"
+	SobesTechLaunchAgentLabel  = "com.igor.sobestech-importer"
+	DefaultSobesTechSettleSecs = 15
 )
 
 type Config struct {
@@ -28,10 +30,12 @@ type Config struct {
 	MakeCommand            string `json:"make_command"`
 	NotifierCommand        string `json:"notifier_command"`
 	PromptCommand          string `json:"prompt_command"`
+	SobesTechInputDir      string `json:"sobestech_input_dir"`
+	SobesTechSettleSeconds int    `json:"sobestech_settle_seconds"`
 	OutputWidth            int    `json:"output_width"`
 	OutputHeight           int    `json:"output_height"`
 	OutputFPS              int    `json:"output_fps"`
-	VideoQuality           int    `json:"video_quality"`
+	MaxOutputSizePercent   int    `json:"max_output_size_percent"`
 	AudioBitrateKbps       int    `json:"audio_bitrate_kbps"`
 	DeleteSourceOnSuccess  bool   `json:"delete_source_on_success"`
 	Notifications          bool   `json:"notifications"`
@@ -52,10 +56,12 @@ func Default(home string) Config {
 		MakeCommand:            "/usr/bin/make",
 		NotifierCommand:        filepath.Join(appSupport, "OBS Interview Notifier.app", "Contents", "MacOS", "obs-interview-notifier"),
 		PromptCommand:          filepath.Join(appSupport, "OBS Interview Prompt.app", "Contents", "MacOS", "obs-interview-prompt"),
+		SobesTechInputDir:      filepath.Join(home, "Library", "Application Support", "com.pers0na2.identityproxy", "interview_recordings"),
+		SobesTechSettleSeconds: DefaultSobesTechSettleSecs,
 		OutputWidth:            1512,
 		OutputHeight:           982,
 		OutputFPS:              30,
-		VideoQuality:           55,
+		MaxOutputSizePercent:   80,
 		AudioBitrateKbps:       96,
 		DeleteSourceOnSuccess:  true,
 		Notifications:          true,
@@ -156,6 +162,9 @@ func (c Config) DoneDir() string   { return filepath.Join(c.StateDir, "done") }
 func (c Config) FailedDir() string { return filepath.Join(c.StateDir, "failed") }
 func (c Config) LogsDir() string   { return filepath.Join(c.StateDir, "logs") }
 func (c Config) WorkDir() string   { return filepath.Join(c.StateDir, "work") }
+func (c Config) SobesTechReceiptsDir() string {
+	return filepath.Join(c.StateDir, "sobestech-imports")
+}
 
 func (c Config) Validate() error {
 	if c.Version != CurrentVersion {
@@ -172,6 +181,7 @@ func (c Config) Validate() error {
 		"make_command":             c.MakeCommand,
 		"notifier_command":         c.NotifierCommand,
 		"prompt_command":           c.PromptCommand,
+		"sobestech_input_dir":      c.SobesTechInputDir,
 	} {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("config %s is empty", name)
@@ -183,11 +193,14 @@ func (c Config) Validate() error {
 	if c.OutputFPS <= 0 || c.OutputFPS > 120 {
 		return fmt.Errorf("output_fps must be between 1 and 120")
 	}
-	if c.VideoQuality < 1 || c.VideoQuality > 100 {
-		return fmt.Errorf("video_quality must be between 1 and 100")
+	if c.MaxOutputSizePercent < 10 || c.MaxOutputSizePercent > 95 {
+		return fmt.Errorf("max_output_size_percent must be between 10 and 95")
 	}
 	if c.AudioBitrateKbps < 32 || c.AudioBitrateKbps > 320 {
 		return fmt.Errorf("audio_bitrate_kbps must be between 32 and 320")
+	}
+	if c.SobesTechSettleSeconds < 1 || c.SobesTechSettleSeconds > 3600 {
+		return fmt.Errorf("sobestech_settle_seconds must be between 1 and 3600")
 	}
 	return nil
 }
