@@ -22,12 +22,13 @@ func TestNotificationArgsOpenExactFolder(t *testing.T) {
 }
 
 func TestPromptArgsPassExactRecordingAndDefaults(t *testing.T) {
-	got := promptArgs("/tmp/processor", "/tmp/config.json", "/Users/igor/Movies/Собес 1.mp4", true)
+	got := promptArgs("/tmp/processor", "/tmp/config.json", "/Users/igor/Movies/Собес 1.mp4", true, false)
 	want := []string{
 		"--processor", "/tmp/processor",
 		"--config", "/tmp/config.json",
 		"--recording", "/Users/igor/Movies/Собес 1.mp4",
 		"--delete-source-default", "true",
+		"--discard-on-skip", "false",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("promptArgs() = %#v, want %#v", got, want)

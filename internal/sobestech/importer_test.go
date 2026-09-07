@@ -11,22 +11,28 @@ import (
 
 	"github.com/chupakobra6/obs-interview-pipeline/internal/config"
 	"github.com/chupakobra6/obs-interview-pipeline/internal/media"
+	"github.com/chupakobra6/obs-interview-pipeline/internal/policy"
 	jobqueue "github.com/chupakobra6/obs-interview-pipeline/internal/queue"
 )
 
-func TestImporterEnqueuesCompletedRecordingExactlyOnce(t *testing.T) {
+func TestImporterPromptsForCompletedRecordingExactlyOnce(t *testing.T) {
 	cfg := importerTestConfig(t.TempDir())
 	source, _ := writeCompletedRecording(t, cfg, "Техническое интервью_2026-09-07_14-02-08.682", "completed")
 	probe := sourceTestProbe()
 	importer := New(cfg)
 	importer.Probe = func(context.Context, string, string) (media.Probe, error) { return probe, nil }
 	importer.Now = func() time.Time { return time.Now().Add(time.Minute) }
+	var prompts []string
+	importer.Prompt = func(path string) error {
+		prompts = append(prompts, path)
+		return nil
+	}
 
 	report, err := importer.Import(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Imported != 1 || report.Errors != 0 || len(report.Items) != 1 || report.Items[0].Status != "queued" {
+	if report.Prompted != 1 || report.Errors != 0 || len(report.Items) != 1 || report.Items[0].Status != "prompted" {
 		t.Fatalf("first import report = %+v", report)
 	}
 	staging := filepath.Join(cfg.AllowedInputDir, "2026-09-07 14-02-08.mp4")
@@ -36,22 +42,20 @@ func TestImporterEnqueuesCompletedRecordingExactlyOnce(t *testing.T) {
 	if _, err := os.Stat(source); err != nil {
 		t.Fatalf("SobesTech source was removed: %v", err)
 	}
-	paths, err := jobqueue.Pending(cfg)
-	if err != nil || len(paths) != 1 {
-		t.Fatalf("pending jobs = %v, %v", paths, err)
+	if len(prompts) != 1 || prompts[0] != staging {
+		t.Fatalf("prompt calls = %v", prompts)
 	}
-	job, err := jobqueue.Read(paths[0])
-	if err != nil || job.Path != staging || !job.Options.DeleteSource {
-		t.Fatalf("queued job = %+v, %v", job, err)
+	paths, err := jobqueue.Pending(cfg)
+	if err != nil || len(paths) != 0 {
+		t.Fatalf("importer unexpectedly queued jobs = %v, %v", paths, err)
 	}
 
 	report, err = importer.Import(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	paths, _ = jobqueue.Pending(cfg)
-	if report.Imported != 0 || len(paths) != 1 {
-		t.Fatalf("duplicate import report = %+v, jobs = %v", report, paths)
+	if report.Prompted != 0 || len(prompts) != 1 {
+		t.Fatalf("duplicate prompt report = %+v, prompts = %v", report, prompts)
 	}
 }
 
@@ -99,7 +103,7 @@ func TestImporterTracksExistingValidatedResultWithoutReimport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Imported != 0 || len(report.Items) != 1 || report.Items[0].Status != "already-processed" {
+	if report.Prompted != 0 || len(report.Items) != 1 || report.Items[0].Status != "already-processed" {
 		t.Fatalf("existing result report = %+v", report)
 	}
 	if _, err := os.Stat(staging); !os.IsNotExist(err) {
@@ -116,7 +120,7 @@ func TestImporterWaitsForCompletedSettledManifest(t *testing.T) {
 	importer := New(cfg)
 	importer.Now = time.Now
 	report, err := importer.Import(t.Context())
-	if err != nil || report.Imported != 0 || report.Skipped != 1 {
+	if err != nil || report.Prompted != 0 || report.Skipped != 1 {
 		t.Fatalf("active recording report = %+v, %v", report, err)
 	}
 	payload, err := os.ReadFile(manifestPath)
@@ -133,7 +137,7 @@ func TestImporterWaitsForCompletedSettledManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	report, err = importer.Import(t.Context())
-	if err != nil || report.Imported != 0 || report.Skipped != 1 {
+	if err != nil || report.Prompted != 0 || report.Skipped != 1 {
 		t.Fatalf("unsettled recording report = %+v, %v", report, err)
 	}
 }
@@ -182,15 +186,17 @@ func TestImporterReconcilesSuccessfulManualRetry(t *testing.T) {
 	importer := New(cfg)
 	importer.Probe = func(context.Context, string, string) (media.Probe, error) { return sourceTestProbe(), nil }
 	importer.Now = func() time.Time { return time.Now().Add(time.Minute) }
+	importer.Prompt = func(string) error { return nil }
 	if _, err := importer.Import(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := jobqueue.Pending(cfg)
-	if err != nil || len(pending) != 1 {
-		t.Fatalf("pending jobs = %v, %v", pending, err)
+	staging := filepath.Join(cfg.AllowedInputDir, "2026-09-07 17-00-00.mp4")
+	first, err := jobqueue.Enqueue(cfg, staging, policy.Options{DeleteSource: true, AudioMode: policy.AudioPreserve})
+	if err != nil {
+		t.Fatal(err)
 	}
-	first, err := jobqueue.Read(pending[0])
-	if err != nil || jobqueue.Finish(cfg, pending[0], first, errors.New("first attempt failed")) != nil {
+	firstPath := filepath.Join(cfg.QueueDir(), first.ID+".json")
+	if err := jobqueue.Finish(cfg, firstPath, first, errors.New("first attempt failed")); err != nil {
 		t.Fatalf("finish first attempt: %v", err)
 	}
 	if _, err := importer.Import(t.Context()); err != nil {

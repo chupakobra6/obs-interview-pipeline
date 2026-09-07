@@ -6,13 +6,14 @@ struct PromptArguments {
     let config: String
     let recording: String
     let deleteSourceDefault: Bool
+    let discardOnSkip: Bool
 
     static func parse(_ values: [String]) -> PromptArguments? {
         var parsed: [String: String] = [:]
         var index = 0
         while index < values.count {
             let key = values[index]
-            guard ["--processor", "--config", "--recording", "--delete-source-default"].contains(key), index + 1 < values.count else {
+            guard ["--processor", "--config", "--recording", "--delete-source-default", "--discard-on-skip"].contains(key), index + 1 < values.count else {
                 return nil
             }
             parsed[key] = values[index + 1]
@@ -23,7 +24,9 @@ struct PromptArguments {
             let config = parsed["--config"], FileManager.default.fileExists(atPath: config),
             let recording = parsed["--recording"], FileManager.default.fileExists(atPath: recording),
             let deleteValue = parsed["--delete-source-default"],
-            let deleteSourceDefault = Bool(deleteValue)
+            let deleteSourceDefault = Bool(deleteValue),
+            let discardValue = parsed["--discard-on-skip"],
+            let discardOnSkip = Bool(discardValue)
         else {
             return nil
         }
@@ -31,7 +34,8 @@ struct PromptArguments {
             processor: processor,
             config: config,
             recording: recording,
-            deleteSourceDefault: deleteSourceDefault
+            deleteSourceDefault: deleteSourceDefault,
+            discardOnSkip: discardOnSkip
         )
     }
 }
@@ -51,7 +55,7 @@ func showError(_ message: String) {
 }
 
 guard let arguments = PromptArguments.parse(Array(CommandLine.arguments.dropFirst())) else {
-    fail("usage: obs-interview-prompt --processor PATH --config PATH --recording PATH --delete-source-default true|false")
+    fail("usage: obs-interview-prompt --processor PATH --config PATH --recording PATH --delete-source-default true|false --discard-on-skip true|false")
 }
 
 let application = NSApplication.shared
@@ -72,13 +76,21 @@ choices.frame = NSRect(x: 0, y: 0, width: 430, height: 48)
 
 let alert = NSAlert()
 alert.alertStyle = .informational
-alert.messageText = "Обработать запись OBS?"
+alert.messageText = "Обработать запись?"
 alert.informativeText = URL(fileURLWithPath: arguments.recording).lastPathComponent
 alert.accessoryView = choices
 alert.addButton(withTitle: "Сжать и расшифровать")
 alert.addButton(withTitle: "Оставить без обработки")
 
 guard alert.runModal() == .alertFirstButtonReturn else {
+    if arguments.discardOnSkip {
+        do {
+            try FileManager.default.removeItem(atPath: arguments.recording)
+        } catch {
+            showError("Не удалось удалить временную копию: \(error.localizedDescription)")
+            exit(1)
+        }
+    }
     exit(0)
 }
 

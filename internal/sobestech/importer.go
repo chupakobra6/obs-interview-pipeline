@@ -31,18 +31,18 @@ const (
 var recordingTimestampPattern = regexp.MustCompile(`_([0-9]{4}-[0-9]{2}-[0-9]{2})_([0-9]{2}-[0-9]{2}-[0-9]{2})\.[0-9]+$`)
 
 type ProbeFunc func(context.Context, string, string) (media.Probe, error)
-type EnqueueFunc func(config.Config, string, policy.Options) (jobqueue.Job, error)
+type PromptFunc func(string) error
 
 type Importer struct {
-	Config  config.Config
-	Probe   ProbeFunc
-	Enqueue EnqueueFunc
-	Now     func() time.Time
+	Config config.Config
+	Probe  ProbeFunc
+	Prompt PromptFunc
+	Now    func() time.Time
 }
 
 type Report struct {
 	Scanned  int    `json:"scanned"`
-	Imported int    `json:"imported"`
+	Prompted int    `json:"prompted"`
 	Skipped  int    `json:"skipped"`
 	Errors   int    `json:"errors"`
 	Items    []Item `json:"items,omitempty"`
@@ -96,10 +96,9 @@ type finalManifest struct {
 
 func New(cfg config.Config) Importer {
 	return Importer{
-		Config:  cfg,
-		Probe:   media.Inspect,
-		Enqueue: jobqueue.Enqueue,
-		Now:     time.Now,
+		Config: cfg,
+		Probe:  media.Inspect,
+		Now:    time.Now,
 	}
 }
 
@@ -171,8 +170,8 @@ func (i Importer) Import(ctx context.Context) (Report, error) {
 			continue
 		}
 		switch action {
-		case "queued":
-			report.Imported++
+		case "prompted":
+			report.Prompted++
 			report.Items = append(report.Items, item)
 		case "tracked", "already-processed":
 			report.Items = append(report.Items, item)
@@ -249,7 +248,7 @@ func (i Importer) importManifest(ctx context.Context, manifestPath string) (Item
 	if saved, ok := readReceipt(receiptPath); ok {
 		item.JobID = saved.JobID
 		item.Status = saved.Status
-		if saved.Status == "queued" || saved.Status == "done" || saved.Status == "failed" {
+		if saved.Status == "prompted" || saved.Status == "queued" || saved.Status == "done" || saved.Status == "failed" {
 			if job, status, found := findJob(i.Config, stagingPath); found {
 				saved.JobID = job.ID
 				saved.Status = status
@@ -261,7 +260,7 @@ func (i Importer) importManifest(ctx context.Context, manifestPath string) (Item
 			}
 		}
 		switch item.Status {
-		case "queued", "done", "failed", "already-processed":
+		case "prompted", "queued", "done", "failed", "already-processed":
 			return item, "skipped", nil
 		}
 	}
@@ -297,19 +296,19 @@ func (i Importer) importManifest(ctx context.Context, manifestPath string) (Item
 	if err := writeJSONAtomic(receiptPath, saved); err != nil {
 		return item, "", err
 	}
-	job, err := i.Enqueue(i.Config, stagingPath, policy.Options{DeleteSource: true, AudioMode: policy.AudioPreserve})
-	if err != nil {
-		return item, "", fmt.Errorf("enqueue imported SobesTech video: %w", err)
+	if i.Prompt == nil {
+		return item, "", fmt.Errorf("SobesTech prompt launcher is not configured")
 	}
-	saved.JobID = job.ID
-	saved.Status = "queued"
+	if err := i.Prompt(stagingPath); err != nil {
+		return item, "", fmt.Errorf("open SobesTech processing prompt: %w", err)
+	}
+	saved.Status = "prompted"
 	saved.UpdatedAt = i.Now()
 	if err := writeJSONAtomic(receiptPath, saved); err != nil {
 		return item, "", err
 	}
-	item.JobID = job.ID
-	item.Status = "queued"
-	return item, "queued", nil
+	item.Status = "prompted"
+	return item, "prompted", nil
 }
 
 func (i Importer) stagingPath(sourcePath string) (string, error) {

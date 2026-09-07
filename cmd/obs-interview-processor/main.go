@@ -78,7 +78,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		printJSON(stdout, job)
 		return 0
 	case "import-sobestech":
-		cfg, rest, err := loadConfigArgs(home, "import-sobestech", args[1:])
+		cfg, cfgPath, rest, err := loadConfigPathArgs(home, "import-sobestech", args[1:])
 		if err != nil || len(rest) != 0 {
 			if err == nil {
 				err = fmt.Errorf("import-sobestech takes no positional arguments")
@@ -86,8 +86,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 2
 		}
-		report, err := sobestech.New(cfg).Import(ctx)
-		if report.Imported > 0 || report.Errors > 0 || len(report.Items) > 0 {
+		importer := sobestech.New(cfg)
+		importer.Prompt = func(recording string) error {
+			return launchPrompt(cfg, cfgPath, recording, true)
+		}
+		report, err := importer.Import(ctx)
+		if report.Prompted > 0 || report.Errors > 0 || len(report.Items) > 0 {
 			printJSON(stdout, report)
 		}
 		if err != nil {
@@ -107,7 +111,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 2
 		}
-		if err := launchPrompt(cfg, cfgPath, rest[0]); err != nil {
+		if err := launchPrompt(cfg, cfgPath, rest[0], false); err != nil {
 			fmt.Fprintf(stderr, "prompt: %v\n", err)
 			return 1
 		}
@@ -381,7 +385,7 @@ func applicationPath(command string) string {
 	return filepath.Dir(filepath.Dir(filepath.Dir(command)))
 }
 
-func launchPrompt(cfg config.Config, cfgPath, recording string) error {
+func launchPrompt(cfg config.Config, cfgPath, recording string, discardOnSkip bool) error {
 	absRecording, err := filepath.Abs(recording)
 	if err != nil {
 		return fmt.Errorf("resolve recording path: %w", err)
@@ -394,19 +398,20 @@ func launchPrompt(cfg config.Config, cfgPath, recording string) error {
 		return fmt.Errorf("recording must be a non-empty regular file")
 	}
 	installedProcessor := filepath.Join(cfg.StateDir, "bin", executableName)
-	args := append([]string{"-n", applicationPath(cfg.PromptCommand), "--args"}, promptArgs(installedProcessor, cfgPath, absRecording, cfg.DeleteSourceOnSuccess)...)
+	args := append([]string{"-n", applicationPath(cfg.PromptCommand), "--args"}, promptArgs(installedProcessor, cfgPath, absRecording, cfg.DeleteSourceOnSuccess, discardOnSkip)...)
 	if output, err := exec.Command("/usr/bin/open", args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("launch prompt app: %w: %s", err, oneLineDetail(string(output)))
 	}
 	return nil
 }
 
-func promptArgs(processorPath, cfgPath, recordingPath string, deleteSourceDefault bool) []string {
+func promptArgs(processorPath, cfgPath, recordingPath string, deleteSourceDefault, discardOnSkip bool) []string {
 	return []string{
 		"--processor", processorPath,
 		"--config", cfgPath,
 		"--recording", recordingPath,
 		"--delete-source-default", strconv.FormatBool(deleteSourceDefault),
+		"--discard-on-skip", strconv.FormatBool(discardOnSkip),
 	}
 }
 
