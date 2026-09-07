@@ -3,6 +3,7 @@ package sobestech
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -172,6 +173,47 @@ func TestImporterBoundsRetriesForBadCompletedManifest(t *testing.T) {
 	report, err := importer.Import(t.Context())
 	if err != nil || report.Errors != 0 || report.Skipped != 1 {
 		t.Fatalf("terminal retry report = %+v, error = %v", report, err)
+	}
+}
+
+func TestImporterReconcilesSuccessfulManualRetry(t *testing.T) {
+	cfg := importerTestConfig(t.TempDir())
+	writeCompletedRecording(t, cfg, "Интервью_2026-09-07_17-00-00.001", "completed")
+	importer := New(cfg)
+	importer.Probe = func(context.Context, string, string) (media.Probe, error) { return sourceTestProbe(), nil }
+	importer.Now = func() time.Time { return time.Now().Add(time.Minute) }
+	if _, err := importer.Import(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := jobqueue.Pending(cfg)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending jobs = %v, %v", pending, err)
+	}
+	first, err := jobqueue.Read(pending[0])
+	if err != nil || jobqueue.Finish(cfg, pending[0], first, errors.New("first attempt failed")) != nil {
+		t.Fatalf("finish first attempt: %v", err)
+	}
+	if _, err := importer.Import(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	second, err := jobqueue.Enqueue(cfg, first.Path, first.Options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPath := filepath.Join(cfg.QueueDir(), second.ID+".json")
+	if err := jobqueue.Finish(cfg, secondPath, second, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importer.Import(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	receiptPaths, err := filepath.Glob(filepath.Join(cfg.SobesTechReceiptsDir(), "*.json"))
+	if err != nil || len(receiptPaths) != 1 {
+		t.Fatalf("receipt paths = %v, %v", receiptPaths, err)
+	}
+	saved, ok := readReceipt(receiptPaths[0])
+	if !ok || saved.Status != "done" || saved.JobID != second.ID {
+		t.Fatalf("retry receipt = %+v, valid = %t", saved, ok)
 	}
 }
 

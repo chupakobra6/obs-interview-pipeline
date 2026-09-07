@@ -249,7 +249,7 @@ func (i Importer) importManifest(ctx context.Context, manifestPath string) (Item
 	if saved, ok := readReceipt(receiptPath); ok {
 		item.JobID = saved.JobID
 		item.Status = saved.Status
-		if saved.Status == "queued" {
+		if saved.Status == "queued" || saved.Status == "done" || saved.Status == "failed" {
 			if job, status, found := findJob(i.Config, stagingPath); found {
 				saved.JobID = job.ID
 				saved.Status = status
