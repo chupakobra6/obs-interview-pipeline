@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chupakobra6/obs-interview-pipeline/internal/asr"
 	"github.com/chupakobra6/obs-interview-pipeline/internal/config"
@@ -218,9 +219,9 @@ func TestPipelineFailureKeepsSourceAndPublishesNothing(t *testing.T) {
 		Transcriber: transcriberFunc(func(context.Context, string, string) (asr.Result, error) {
 			return asr.Result{}, errors.New("ASR failed")
 		}),
-		Compressor: compressorFunc(func(ctx context.Context, _, _ string, _ media.Probe, _ policy.Options) (Compression, error) {
-			<-ctx.Done()
-			return Compression{}, ctx.Err()
+		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options) (Compression, error) {
+			compression := Compression{VideoMode: "copy", AudioMode: policy.AudioPreserve, SourceAudioTracks: 1, OutputAudioTracks: 1, AudioBitrateKbps: 96}
+			return compression, os.WriteFile(output, make([]byte, 500), 0o600)
 		}),
 		Probe:  fakeProbe(source),
 		Remove: os.Remove,
@@ -233,6 +234,94 @@ func TestPipelineFailureKeepsSourceAndPublishesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cfg.OutputDir, "failure")); !os.IsNotExist(err) {
 		t.Fatalf("final output was published on failure: %v", err)
+	}
+}
+
+func TestPipelineRetryReusesValidatedCompressionCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig(dir)
+	source := filepath.Join(cfg.AllowedInputDir, "retry.mp4")
+	if err := os.MkdirAll(cfg.AllowedInputDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, make([]byte, 1000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	compressions := 0
+	transcriptions := 0
+	pipeline := Pipeline{
+		Config: cfg,
+		Transcriber: transcriberFunc(func(context.Context, string, string) (asr.Result, error) {
+			transcriptions++
+			if transcriptions == 1 {
+				return asr.Result{}, errors.New("retryable ASR failure")
+			}
+			return asr.Result{Text: "Готово.", SpeechDetected: true, MetalConfirmed: true}, nil
+		}),
+		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options) (Compression, error) {
+			compressions++
+			compression := Compression{VideoMode: "transcode", VideoFilters: []string{"scale=1512:982:flags=lanczos"}, AudioMode: policy.AudioPreserve, SourceAudioTracks: 1, OutputAudioTracks: 1, AudioBitrateKbps: 96}
+			return compression, os.WriteFile(output, make([]byte, 500), 0o600)
+		}),
+		Probe:  fakeProbe(source),
+		Remove: os.Remove,
+	}
+	options := policy.Options{AudioMode: policy.AudioPreserve}
+	if _, err := pipeline.Process(context.Background(), source, options); err == nil || !strings.Contains(err.Error(), "retryable ASR failure") {
+		t.Fatalf("first Process() error = %v", err)
+	}
+	resolvedSource, err := pipeline.resolveInputPath(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := filepath.Join(pipeline.processingDir(resolvedSource), "compression-checkpoint.json")
+	if _, err := os.Stat(checkpoint); err != nil {
+		t.Fatalf("compression checkpoint is unavailable after ASR failure: %v", err)
+	}
+	result, err := pipeline.Process(context.Background(), source, options)
+	if err != nil {
+		t.Fatalf("retry Process() error = %v", err)
+	}
+	if compressions != 1 || transcriptions != 2 {
+		t.Fatalf("stage calls = compression %d, transcription %d; want 1, 2", compressions, transcriptions)
+	}
+	if result.OutputBytes != 500 {
+		t.Fatalf("retry output bytes = %d", result.OutputBytes)
+	}
+	if _, err := os.Stat(filepath.Join(result.FinalDir, "compression-checkpoint.json")); !os.IsNotExist(err) {
+		t.Fatalf("internal checkpoint was published: %v", err)
+	}
+}
+
+func TestPipelineCompressionFinishesBeforeTranscriptionStarts(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig(dir)
+	source := filepath.Join(cfg.AllowedInputDir, "sequential.mp4")
+	if err := os.MkdirAll(cfg.AllowedInputDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, make([]byte, 1000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	compressed := false
+	pipeline := Pipeline{
+		Config: cfg,
+		Transcriber: transcriberFunc(func(context.Context, string, string) (asr.Result, error) {
+			if !compressed {
+				t.Fatal("transcription overlapped compression")
+			}
+			return asr.Result{Text: "Последовательно.", SpeechDetected: true, MetalConfirmed: true}, nil
+		}),
+		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options) (Compression, error) {
+			compressed = true
+			compression := Compression{VideoMode: "transcode", AudioMode: policy.AudioPreserve, SourceAudioTracks: 1, OutputAudioTracks: 1, AudioBitrateKbps: 96}
+			return compression, os.WriteFile(output, make([]byte, 500), 0o600)
+		}),
+		Probe:  fakeProbe(source),
+		Remove: os.Remove,
+	}
+	if _, err := pipeline.Process(context.Background(), source, policy.Options{AudioMode: policy.AudioPreserve}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -363,8 +452,20 @@ func TestFFmpegCommandAddsOnlyNecessaryFallbackFilters(t *testing.T) {
 		t.Fatalf("unexpected compression: %+v", compression)
 	}
 	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "-vf scale=1512:982:flags=lanczos") || strings.Contains(joined, "fps=30") {
+	if !strings.Contains(joined, "-vf scale=1512:982:flags=lanczos") || !strings.Contains(joined, "-realtime 1 -prio_speed 1") || strings.Contains(joined, "fps=30") {
 		t.Fatalf("unexpected filters: %q", joined)
+	}
+}
+
+func TestStageTimeoutsBoundSlowWork(t *testing.T) {
+	if got := compressionTimeout(60); got != minimumCompressionTimeout {
+		t.Fatalf("short compression timeout = %s", got)
+	}
+	if got := compressionTimeout(3600); got != 15*time.Minute {
+		t.Fatalf("long compression timeout = %s", got)
+	}
+	if got := transcriptionTimeout(3600); got != 12*time.Minute {
+		t.Fatalf("long transcription timeout = %s", got)
 	}
 }
 

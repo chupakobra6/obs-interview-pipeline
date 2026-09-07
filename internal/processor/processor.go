@@ -3,6 +3,7 @@ package processor
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,7 +21,12 @@ import (
 	"github.com/chupakobra6/obs-interview-pipeline/internal/policy"
 )
 
-const manifestVersion = 3
+const (
+	manifestVersion              = 3
+	compressionCheckpointVersion = 1
+	minimumCompressionTimeout    = 2 * time.Minute
+	minimumTranscriptionTimeout  = 3 * time.Minute
+)
 
 type Compressor interface {
 	Compress(context.Context, string, string, media.Probe, policy.Options) (Compression, error)
@@ -111,6 +117,7 @@ func (c FFmpegCompressor) command(inputPath, outputPath string, source media.Pro
 	} else {
 		args = append(args,
 			"-c:v", "hevc_videotoolbox", "-tag:v", "hvc1", "-q:v", fmt.Sprintf("%d", c.Config.VideoQuality),
+			"-realtime", "1", "-prio_speed", "1",
 		)
 	}
 	args = append(args,
@@ -166,6 +173,25 @@ type sourceIdentity struct {
 	ModifiedAtUnixNano int64  `json:"modified_at_unix_nano"`
 }
 
+type compressionSettings struct {
+	OutputWidth      int `json:"output_width"`
+	OutputHeight     int `json:"output_height"`
+	OutputFPS        int `json:"output_fps"`
+	VideoQuality     int `json:"video_quality"`
+	AudioBitrateKbps int `json:"audio_bitrate_kbps"`
+}
+
+type compressionCheckpoint struct {
+	Version        int                 `json:"version"`
+	SourcePath     string              `json:"source_path"`
+	SourceIdentity sourceIdentity      `json:"source_identity"`
+	SourceProbe    media.Probe         `json:"source_probe"`
+	OutputProbe    media.Probe         `json:"output_probe"`
+	Compression    Compression         `json:"compression"`
+	Options        policy.Options      `json:"options"`
+	Settings       compressionSettings `json:"settings"`
+}
+
 func New(cfg config.Config) Pipeline {
 	return Pipeline{
 		Config:      cfg,
@@ -203,81 +229,57 @@ func (p Pipeline) Process(ctx context.Context, inputPath string, options policy.
 		return Result{}, err
 	}
 
-	if err := os.MkdirAll(p.Config.OutputDir, 0o700); err != nil {
-		return Result{}, fmt.Errorf("create output root: %w", err)
-	}
-	tempDir, err := os.MkdirTemp(p.Config.OutputDir, ".processing-")
-	if err != nil {
-		return Result{}, fmt.Errorf("create processing directory: %w", err)
-	}
-	published := false
-	defer func() {
-		if !published {
-			_ = os.RemoveAll(tempDir)
-		}
-	}()
-	tempVideo := filepath.Join(tempDir, "recording.mp4")
-	tempTranscript := filepath.Join(tempDir, "transcript.md")
-	tempManifest := filepath.Join(tempDir, "manifest.json")
-	workDir := filepath.Join(tempDir, "work")
-
 	sourceProbe, err := p.Probe(ctx, p.Config.FFprobeCommand, resolvedInput)
 	if err != nil {
 		return Result{}, fmt.Errorf("probe source: %w", err)
 	}
-
-	workCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	type asrOutcome struct {
-		result asr.Result
-		err    error
+	if err := os.MkdirAll(p.Config.OutputDir, 0o700); err != nil {
+		return Result{}, fmt.Errorf("create output root: %w", err)
 	}
-	asrDone := make(chan asrOutcome, 1)
-	type compressOutcome struct {
-		result Compression
-		err    error
+	tempDir := p.processingDir(resolvedInput)
+	if err := os.MkdirAll(tempDir, 0o700); err != nil {
+		return Result{}, fmt.Errorf("create processing directory: %w", err)
 	}
-	compressDone := make(chan compressOutcome, 1)
-	go func() {
-		result, runErr := p.Transcriber.Transcribe(workCtx, resolvedInput, workDir)
-		asrDone <- asrOutcome{result: result, err: runErr}
-	}()
-	go func() {
-		result, compressErr := p.Compressor.Compress(workCtx, resolvedInput, tempVideo, sourceProbe, options)
-		compressDone <- compressOutcome{result: result, err: compressErr}
-	}()
-
-	var asrResult asr.Result
-	var compression Compression
-	var firstErr error
-	for asrDone != nil || compressDone != nil {
-		select {
-		case outcome := <-asrDone:
-			asrDone = nil
-			asrResult = outcome.result
-			if outcome.err != nil && firstErr == nil {
-				firstErr = fmt.Errorf("transcribe: %w", outcome.err)
-				cancel()
-			}
-		case outcome := <-compressDone:
-			compressDone = nil
-			compression = outcome.result
-			if outcome.err != nil && firstErr == nil {
-				firstErr = outcome.err
-				cancel()
-			}
+	tempVideo := filepath.Join(tempDir, "recording.mp4")
+	tempTranscript := filepath.Join(tempDir, "transcript.md")
+	tempManifest := filepath.Join(tempDir, "manifest.json")
+	tempCheckpoint := filepath.Join(tempDir, "compression-checkpoint.json")
+	workDir := filepath.Join(tempDir, "work")
+	published := false
+	defer func() {
+		_ = os.RemoveAll(workDir)
+		if !published {
+			_ = os.Remove(tempTranscript)
+			_ = os.Remove(tempManifest)
 		}
-	}
-	if firstErr != nil {
-		return Result{}, firstErr
-	}
+	}()
 
-	outputProbe, err := p.Probe(ctx, p.Config.FFprobeCommand, tempVideo)
+	compression, outputProbe, err := p.ensureCompression(
+		ctx,
+		resolvedInput,
+		tempDir,
+		tempVideo,
+		tempCheckpoint,
+		initialSourceIdentity,
+		sourceProbe,
+		options,
+	)
 	if err != nil {
-		return Result{}, fmt.Errorf("probe compressed output: %w", err)
+		return Result{}, err
 	}
-	if err := media.ValidateCompressed(sourceProbe, outputProbe, p.Config.OutputWidth, p.Config.OutputHeight, p.Config.OutputFPS, p.Config.AudioBitrateKbps, compression.OutputAudioTracks); err != nil {
-		return Result{}, fmt.Errorf("validate compressed output: %w", err)
+	if err := os.RemoveAll(workDir); err != nil && !os.IsNotExist(err) {
+		return Result{}, fmt.Errorf("reset ASR work directory: %w", err)
+	}
+	asrTimeout := transcriptionTimeout(sourceProbe.DurationSeconds())
+	asrCtx, cancelASR := context.WithTimeout(ctx, asrTimeout)
+	asrResult, err := p.Transcriber.Transcribe(asrCtx, resolvedInput, workDir)
+	asrContextErr := asrCtx.Err()
+	cancelASR()
+	if err != nil {
+		if errors.Is(asrContextErr, context.DeadlineExceeded) {
+			return Result{}, fmt.Errorf("transcribe exceeded %s safety timeout: %w", asrTimeout, err)
+		}
+		return Result{}, fmt.Errorf("transcribe: %w", err)
 	}
 	if err := writeTranscript(tempTranscript, stem, asrResult); err != nil {
 		return Result{}, err
@@ -299,6 +301,9 @@ func (p Pipeline) Process(ctx context.Context, inputPath string, options policy.
 	}
 	if err := os.RemoveAll(workDir); err != nil && !os.IsNotExist(err) {
 		return Result{}, fmt.Errorf("remove ASR work directory: %w", err)
+	}
+	if err := os.Remove(tempCheckpoint); err != nil && !os.IsNotExist(err) {
+		return Result{}, fmt.Errorf("remove compression checkpoint: %w", err)
 	}
 	if err := syncFile(tempVideo); err != nil {
 		return Result{}, err
@@ -340,6 +345,148 @@ func (p Pipeline) Process(ctx context.Context, inputPath string, options policy.
 		Options:        options,
 		CompletedAt:    completedAt,
 	}, nil
+}
+
+func (p Pipeline) processingDir(inputPath string) string {
+	digest := sha256.Sum256([]byte(inputPath))
+	return filepath.Join(p.Config.OutputDir, fmt.Sprintf(".processing-%x", digest[:8]))
+}
+
+func (p Pipeline) ensureCompression(
+	ctx context.Context,
+	inputPath string,
+	tempDir string,
+	videoPath string,
+	checkpointPath string,
+	sourceIdentity sourceIdentity,
+	sourceProbe media.Probe,
+	options policy.Options,
+) (Compression, media.Probe, error) {
+	settings := p.compressionSettings()
+	if checkpoint, ok := p.validCompressionCheckpoint(ctx, checkpointPath, videoPath, inputPath, sourceIdentity, sourceProbe, options, settings); ok {
+		return checkpoint.Compression, checkpoint.OutputProbe, nil
+	}
+	if err := os.RemoveAll(tempDir); err != nil {
+		return Compression{}, media.Probe{}, fmt.Errorf("reset stale processing directory: %w", err)
+	}
+	if err := os.MkdirAll(tempDir, 0o700); err != nil {
+		return Compression{}, media.Probe{}, fmt.Errorf("recreate processing directory: %w", err)
+	}
+
+	timeout := compressionTimeout(sourceProbe.DurationSeconds())
+	compressCtx, cancel := context.WithTimeout(ctx, timeout)
+	compression, err := p.Compressor.Compress(compressCtx, inputPath, videoPath, sourceProbe, options)
+	contextErr := compressCtx.Err()
+	cancel()
+	if err != nil {
+		if errors.Is(contextErr, context.DeadlineExceeded) {
+			return Compression{}, media.Probe{}, fmt.Errorf("compression exceeded %s safety timeout: %w", timeout, err)
+		}
+		return Compression{}, media.Probe{}, err
+	}
+	outputProbe, err := p.Probe(ctx, p.Config.FFprobeCommand, videoPath)
+	if err != nil {
+		return Compression{}, media.Probe{}, fmt.Errorf("probe compressed output: %w", err)
+	}
+	if err := media.ValidateCompressed(sourceProbe, outputProbe, p.Config.OutputWidth, p.Config.OutputHeight, p.Config.OutputFPS, p.Config.AudioBitrateKbps, compression.OutputAudioTracks); err != nil {
+		return Compression{}, media.Probe{}, fmt.Errorf("validate compressed output: %w", err)
+	}
+	checkpoint := compressionCheckpoint{
+		Version:        compressionCheckpointVersion,
+		SourcePath:     inputPath,
+		SourceIdentity: sourceIdentity,
+		SourceProbe:    sourceProbe,
+		OutputProbe:    outputProbe,
+		Compression:    compression,
+		Options:        options,
+		Settings:       settings,
+	}
+	if err := syncFile(videoPath); err != nil {
+		return Compression{}, media.Probe{}, err
+	}
+	if err := writeJSON(checkpointPath, checkpoint); err != nil {
+		return Compression{}, media.Probe{}, fmt.Errorf("write compression checkpoint: %w", err)
+	}
+	if err := syncFile(checkpointPath); err != nil {
+		return Compression{}, media.Probe{}, err
+	}
+	if err := syncDir(tempDir); err != nil {
+		return Compression{}, media.Probe{}, err
+	}
+	return compression, outputProbe, nil
+}
+
+func (p Pipeline) validCompressionCheckpoint(
+	ctx context.Context,
+	checkpointPath string,
+	videoPath string,
+	inputPath string,
+	sourceIdentity sourceIdentity,
+	sourceProbe media.Probe,
+	options policy.Options,
+	settings compressionSettings,
+) (compressionCheckpoint, bool) {
+	payload, err := os.ReadFile(checkpointPath)
+	if err != nil {
+		return compressionCheckpoint{}, false
+	}
+	var checkpoint compressionCheckpoint
+	if json.Unmarshal(payload, &checkpoint) != nil ||
+		checkpoint.Version != compressionCheckpointVersion ||
+		checkpoint.SourcePath != inputPath ||
+		checkpoint.SourceIdentity != sourceIdentity ||
+		!reflect.DeepEqual(checkpoint.SourceProbe, sourceProbe) ||
+		checkpoint.Options != options ||
+		checkpoint.Settings != settings {
+		return compressionCheckpoint{}, false
+	}
+	expectedAudioTracks := sourceProbe.AudioCount()
+	if options.AudioMode == policy.AudioMerge {
+		expectedAudioTracks = 1
+	}
+	if checkpoint.Compression.AudioMode != options.AudioMode ||
+		checkpoint.Compression.SourceAudioTracks != sourceProbe.AudioCount() ||
+		checkpoint.Compression.OutputAudioTracks != expectedAudioTracks ||
+		checkpoint.Compression.AudioBitrateKbps != settings.AudioBitrateKbps {
+		return compressionCheckpoint{}, false
+	}
+	actualOutput, err := p.Probe(ctx, p.Config.FFprobeCommand, videoPath)
+	if err != nil || !reflect.DeepEqual(actualOutput, checkpoint.OutputProbe) {
+		return compressionCheckpoint{}, false
+	}
+	if err := media.ValidateCompressed(sourceProbe, actualOutput, p.Config.OutputWidth, p.Config.OutputHeight, p.Config.OutputFPS, p.Config.AudioBitrateKbps, checkpoint.Compression.OutputAudioTracks); err != nil {
+		return compressionCheckpoint{}, false
+	}
+	return checkpoint, true
+}
+
+func (p Pipeline) compressionSettings() compressionSettings {
+	return compressionSettings{
+		OutputWidth:      p.Config.OutputWidth,
+		OutputHeight:     p.Config.OutputHeight,
+		OutputFPS:        p.Config.OutputFPS,
+		VideoQuality:     p.Config.VideoQuality,
+		AudioBitrateKbps: p.Config.AudioBitrateKbps,
+	}
+}
+
+func compressionTimeout(durationSeconds float64) time.Duration {
+	return stageTimeout(durationSeconds, 4, minimumCompressionTimeout)
+}
+
+func transcriptionTimeout(durationSeconds float64) time.Duration {
+	return stageTimeout(durationSeconds, 5, minimumTranscriptionTimeout)
+}
+
+func stageTimeout(durationSeconds, realtimeDivisor float64, minimum time.Duration) time.Duration {
+	if durationSeconds <= 0 {
+		return minimum
+	}
+	timeout := time.Duration(durationSeconds / realtimeDivisor * float64(time.Second))
+	if timeout < minimum {
+		return minimum
+	}
+	return timeout
 }
 
 func (p Pipeline) finishExisting(ctx context.Context, inputPath, finalDir, videoPath, transcriptPath, manifestPath string, options policy.Options) (Result, error) {
