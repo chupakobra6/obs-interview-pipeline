@@ -428,7 +428,7 @@ func TestFFmpegCommandCopiesReadyHEVCAndPreservesAllAudio(t *testing.T) {
 		t.Fatalf("unexpected compression: %+v", compression)
 	}
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"-map 0:a", "-c:v copy", "-c:a aac", "-b:a 96k", "-movflags +faststart"} {
+	for _, want := range []string{"-map 0:a", "-c:v copy", "-c:a aac", "-b:a 96k", "-movflags +faststart", "-stats_period 1 -progress output.mp4.progress"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("ffmpeg args %q missing %q", joined, want)
 		}

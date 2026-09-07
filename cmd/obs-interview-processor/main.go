@@ -499,7 +499,7 @@ func launchAgentPlist(binary, cfgPath string, cfg config.Config) string {
   <key>QueueDirectories</key>
   <array><string>%s</string></array>
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Interactive</string>
   <key>LowPriorityIO</key>
   <false/>
   <key>StandardOutPath</key>

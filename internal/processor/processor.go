@@ -50,6 +50,7 @@ func (c FFmpegCompressor) Compress(ctx context.Context, inputPath, outputPath st
 	if err != nil {
 		return Compression{}, err
 	}
+	defer os.Remove(outputPath + ".progress")
 	output, err := exec.CommandContext(ctx, c.Config.FFmpegCommand, args...).CombinedOutput()
 	if err != nil {
 		return Compression{}, fmt.Errorf("compress video: %w: %s", err, compact(output))
@@ -124,6 +125,7 @@ func (c FFmpegCompressor) command(inputPath, outputPath string, source media.Pro
 		"-c:a", "aac", "-b:a", fmt.Sprintf("%dk", c.Config.AudioBitrateKbps),
 		"-max_muxing_queue_size", "4096",
 		"-movflags", "+faststart",
+		"-stats_period", "1", "-progress", outputPath+".progress",
 		outputPath,
 	)
 	return compression, args, nil

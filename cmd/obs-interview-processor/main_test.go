@@ -67,3 +67,13 @@ func TestApplicationPath(t *testing.T) {
 		t.Fatalf("applicationPath() = %q, want %q", got, want)
 	}
 }
+
+func TestLaunchAgentUsesInteractiveProcessType(t *testing.T) {
+	plist := launchAgentPlist("/tmp/processor", "/tmp/config.json", config.Default("/Users/igor"))
+	if !strings.Contains(plist, "<key>ProcessType</key>\n  <string>Interactive</string>") {
+		t.Fatalf("LaunchAgent does not preserve foreground processing QoS: %s", plist)
+	}
+	if strings.Contains(plist, "<string>Background</string>") {
+		t.Fatalf("LaunchAgent still requests background throttling: %s", plist)
+	}
+}
