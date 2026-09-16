@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -26,6 +27,7 @@ import (
 const (
 	receiptVersion        = 1
 	maximumImportAttempts = 3
+	dependencyRetryDelay  = 15 * time.Minute
 )
 
 var recordingTimestampPattern = regexp.MustCompile(`_([0-9]{4}-[0-9]{2}-[0-9]{2})_([0-9]{2}-[0-9]{2}-[0-9]{2})\.[0-9]+$`)
@@ -82,7 +84,12 @@ type receipt struct {
 	Error                string    `json:"error,omitempty"`
 	Attempts             int       `json:"attempts,omitempty"`
 	NextAttemptAt        time.Time `json:"next_attempt_at,omitempty"`
+	DependencyKey        string    `json:"dependency_key,omitempty"`
+	RetryCondition       string    `json:"retry_condition,omitempty"`
 }
+
+// An unavailable tool can recover without changing the recording files.
+type retryOnTimerError struct{ error }
 
 type finalManifest struct {
 	SourcePath  string         `json:"source_path"`
@@ -140,22 +147,37 @@ func (i Importer) Import(ctx context.Context) (Report, error) {
 			itemErrors = append(itemErrors, retryPathErr)
 			continue
 		}
-		if saved, ok := readReceipt(retryPath); ok && (saved.Status == "failed" || (!saved.NextAttemptAt.IsZero() && i.Now().Before(saved.NextAttemptAt))) {
-			report.Skipped++
-			continue
+		saved, hasRetry := readReceipt(retryPath)
+		if hasRetry && saved.DependencyKey == i.retryDependencies(manifestPath) {
+			if saved.Status == "failed" || (!saved.NextAttemptAt.IsZero() && i.Now().Before(saved.NextAttemptAt)) {
+				report.Skipped++
+				continue
+			}
+		} else {
+			saved = receipt{}
 		}
 		item, action, itemErr := i.importManifest(ctx, manifestPath)
 		if itemErr != nil {
-			saved, _ := readReceipt(retryPath)
+			if ctx.Err() != nil {
+				return report, errors.Join(ctx.Err(), errors.Join(itemErrors...))
+			}
 			saved.Version = receiptVersion
 			saved.ManifestPath = manifestPath
-			saved.Attempts++
+			saved.Attempts = min(saved.Attempts+1, maximumImportAttempts)
 			saved.Status = "retrying"
 			saved.Error = itemErr.Error()
 			saved.UpdatedAt = i.Now()
+			saved.DependencyKey = i.retryDependencies(manifestPath)
+			saved.RetryCondition = "dependency-change-or-time"
 			if saved.Attempts >= maximumImportAttempts {
-				saved.Status = "failed"
-				saved.NextAttemptAt = time.Time{}
+				var temporary retryOnTimerError
+				if errors.As(itemErr, &temporary) {
+					saved.NextAttemptAt = i.Now().Add(dependencyRetryDelay)
+				} else {
+					saved.Status = "failed"
+					saved.NextAttemptAt = time.Time{}
+					saved.RetryCondition = "dependency-change"
+				}
 			} else {
 				saved.NextAttemptAt = i.Now().Add(time.Duration(1<<(saved.Attempts-1)) * 30 * time.Second)
 			}
@@ -168,6 +190,12 @@ func (i Importer) Import(ctx context.Context) (Report, error) {
 			report.Items = append(report.Items, item)
 			itemErrors = append(itemErrors, fmt.Errorf("import %s: %w", manifestPath, itemErr))
 			continue
+		}
+		if hasRetry {
+			if err := os.Remove(retryPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				report.Errors++
+				itemErrors = append(itemErrors, fmt.Errorf("clear recovered SobesTech retry: %w", err))
+			}
 		}
 		switch action {
 		case "prompted":
@@ -232,37 +260,45 @@ func (i Importer) importManifest(ctx context.Context, manifestPath string) (Item
 		return item, "skipped", nil
 	}
 
-	sourceProbe, err := i.Probe(ctx, i.Config.FFprobeCommand, expectedVideo)
-	if err != nil {
-		return item, "", fmt.Errorf("probe completed SobesTech video: %w", err)
-	}
-	if _, ok := sourceProbe.Video(); !ok || sourceProbe.AudioCount() == 0 || sourceProbe.DurationSeconds() <= 0 {
-		return item, "", fmt.Errorf("completed SobesTech video has invalid media streams")
-	}
 	stagingPath, err := i.stagingPath(expectedVideo)
 	if err != nil {
 		return item, "", err
 	}
 	item.StagingPath = stagingPath
 	receiptPath := i.receiptPath(manifest, expectedVideo, videoInfo)
+	hadPublishedResult := false
 	if saved, ok := readReceipt(receiptPath); ok {
 		item.JobID = saved.JobID
 		item.Status = saved.Status
 		if saved.Status == "prompted" || saved.Status == "queued" || saved.Status == "done" || saved.Status == "failed" {
-			if job, status, found := findJob(i.Config, stagingPath); found {
+			if job, status, found := findJob(i.Config, stagingPath); found && (saved.JobID != job.ID || saved.Status != status || saved.Error != job.Error) {
 				saved.JobID = job.ID
 				saved.Status = status
 				saved.Error = job.Error
 				saved.UpdatedAt = i.Now()
-				_ = writeJSONAtomic(receiptPath, saved)
+				if err := writeJSONAtomic(receiptPath, saved); err != nil {
+					return item, "", err
+				}
 				item.JobID = job.ID
 				item.Status = status
 			}
 		}
 		switch item.Status {
-		case "prompted", "queued", "done", "failed", "already-processed":
+		case "prompted", "queued", "done", "failed":
 			return item, "skipped", nil
+		case "already-processed":
+			hadPublishedResult = true
+			if saved.DependencyKey == i.retryDependencies(manifestPath) {
+				return item, "skipped", nil
+			}
 		}
+	}
+	sourceProbe, err := i.Probe(ctx, i.Config.FFprobeCommand, expectedVideo)
+	if err != nil {
+		return item, "", fmt.Errorf("probe completed SobesTech video: %w", classifyProbeError(err))
+	}
+	if _, ok := sourceProbe.Video(); !ok || sourceProbe.AudioCount() == 0 || sourceProbe.DurationSeconds() <= 0 {
+		return item, "", fmt.Errorf("completed SobesTech video has invalid media streams")
 	}
 
 	if valid, err := i.validExistingFinal(ctx, stagingPath, sourceProbe); err != nil {
@@ -270,10 +306,14 @@ func (i Importer) importManifest(ctx context.Context, manifestPath string) (Item
 	} else if valid {
 		item.Status = "already-processed"
 		saved := newReceipt(manifest, manifestPath, expectedVideo, videoInfo, stagingPath, item.Status, i.Now())
+		saved.DependencyKey = i.retryDependencies(manifestPath)
 		if err := writeJSONAtomic(receiptPath, saved); err != nil {
 			return item, "", err
 		}
 		return item, "already-processed", nil
+	}
+	if hadPublishedResult {
+		return item, "", fmt.Errorf("previously processed SobesTech result is missing; restore or inspect the published result")
 	}
 	if job, status, found := findJob(i.Config, stagingPath); found {
 		item.JobID = job.ID
@@ -297,10 +337,10 @@ func (i Importer) importManifest(ctx context.Context, manifestPath string) (Item
 		return item, "", err
 	}
 	if i.Prompt == nil {
-		return item, "", fmt.Errorf("SobesTech prompt launcher is not configured")
+		return item, "", retryOnTimerError{fmt.Errorf("SobesTech prompt launcher is not configured")}
 	}
 	if err := i.Prompt(stagingPath); err != nil {
-		return item, "", fmt.Errorf("open SobesTech processing prompt: %w", err)
+		return item, "", retryOnTimerError{fmt.Errorf("open SobesTech processing prompt: %w", err)}
 	}
 	saved.Status = "prompted"
 	saved.UpdatedAt = i.Now()
@@ -336,6 +376,46 @@ func (i Importer) retryReceiptPath(manifestPath string) (string, error) {
 	return filepath.Join(i.Config.SobesTechReceiptsDir(), fmt.Sprintf("retry-%x.json", digest[:12])), nil
 }
 
+// Use cheap dependency metadata for retry eligibility, never probe or hash media here.
+func (i Importer) retryDependencies(manifestPath string) string {
+	h := sha256.New()
+	videoPath := strings.TrimSuffix(manifestPath, filepath.Ext(manifestPath)) + ".mp4"
+	paths := []string{manifestPath, videoPath}
+	for _, command := range []string{i.Config.FFprobeCommand, i.Config.PromptCommand} {
+		resolved, err := exec.LookPath(command)
+		fmt.Fprintf(h, "%q:%q:%v\n", command, resolved, err)
+		if err == nil {
+			paths = append(paths, resolved)
+		}
+	}
+	if staging, err := i.stagingPath(videoPath); err == nil {
+		finalDir := filepath.Join(i.Config.OutputDir, strings.TrimSuffix(filepath.Base(staging), filepath.Ext(staging)))
+		paths = append(paths, staging, filepath.Join(finalDir, "manifest.json"), filepath.Join(finalDir, "recording.mp4"), filepath.Join(finalDir, "transcript.md"))
+	}
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		fmt.Fprintf(h, "%q:", path)
+		if err != nil {
+			fmt.Fprintf(h, "%v\n", err)
+			continue
+		}
+		fmt.Fprintf(h, "%d:%d:%d", info.Mode(), info.Size(), info.ModTime().UnixNano())
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+			fmt.Fprintf(h, ":%d:%d", stat.Dev, stat.Ino)
+		}
+		fmt.Fprintln(h)
+	}
+	fmt.Fprintf(h, "%d:%d:%d:%d:%d", i.Config.OutputWidth, i.Config.OutputHeight, i.Config.OutputFPS, i.Config.AudioBitrateKbps, i.Config.MaxOutputSizePercent)
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func classifyProbeError(err error) error {
+	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EAGAIN) || errors.Is(err, context.DeadlineExceeded) {
+		return retryOnTimerError{err}
+	}
+	return err
+}
+
 func (i Importer) validExistingFinal(ctx context.Context, stagingPath string, sourceProbe media.Probe) (bool, error) {
 	stem := strings.TrimSuffix(filepath.Base(stagingPath), filepath.Ext(stagingPath))
 	finalDir := filepath.Join(i.Config.OutputDir, stem)
@@ -361,7 +441,7 @@ func (i Importer) validExistingFinal(ctx context.Context, stagingPath string, so
 	}
 	actualOutput, err := i.Probe(ctx, i.Config.FFprobeCommand, filepath.Join(finalDir, "recording.mp4"))
 	if err != nil {
-		return false, fmt.Errorf("probe existing pipeline video: %w", err)
+		return false, fmt.Errorf("probe existing pipeline video: %w", classifyProbeError(err))
 	}
 	if !reflect.DeepEqual(actualOutput, saved.OutputProbe) {
 		return false, fmt.Errorf("existing pipeline video differs from its manifest")
