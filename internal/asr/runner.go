@@ -20,6 +20,7 @@ const (
 	harvestProfileID              = "adaptive-media-v2"
 	harvestValidationRuntimeReady = "runtime-ready"
 	harvestValidationTranscribed  = "transcribed"
+	harvestValidationNoSpeech     = "no-speech"
 	harvestValidationCoverage     = "coverage-validated"
 )
 
@@ -148,12 +149,16 @@ func decodeHarvestResponse(payload []byte, transcriptPath string) (Result, error
 		response.Status,
 		response.ProfileID,
 		response.ValidationStatus,
-		[]string{harvestValidationTranscribed, harvestValidationCoverage},
+		[]string{harvestValidationTranscribed, harvestValidationNoSpeech, harvestValidationCoverage},
 		"",
 	); err != nil {
 		return Result{}, err
 	}
-	if strings.TrimSpace(response.Text) == "" {
+	if response.ValidationStatus == harvestValidationNoSpeech {
+		if response.SpeechDetected || strings.TrimSpace(response.Text) != "" {
+			return Result{}, fmt.Errorf("telegram-harvest no-speech result contains detected speech or transcript")
+		}
+	} else if strings.TrimSpace(response.Text) == "" {
 		return Result{}, fmt.Errorf("telegram-harvest ASR returned no transcript for interview input")
 	}
 	transcript, err := os.ReadFile(transcriptPath)

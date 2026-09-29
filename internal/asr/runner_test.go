@@ -89,7 +89,7 @@ func TestDecodeHarvestResponseRejectsWrongPublicContract(t *testing.T) {
 		{name: "version", mutate: func(value *harvestResponse) { value.ContractVersion-- }, want: "contract"},
 		{name: "status", mutate: func(value *harvestResponse) { value.Status = "error" }, want: "status"},
 		{name: "profile", mutate: func(value *harvestResponse) { value.ProfileID = "legacy-profile" }, want: "profile"},
-		{name: "validation", mutate: func(value *harvestResponse) { value.ValidationStatus = "no-speech" }, want: "validation status"},
+		{name: "validation", mutate: func(value *harvestResponse) { value.ValidationStatus = "unknown" }, want: "validation status"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -122,6 +122,36 @@ func TestDecodeHarvestResponseAcceptsAdaptiveShortResult(t *testing.T) {
 	}
 	if result.ValidationStatus != harvestValidationTranscribed {
 		t.Fatalf("validation status = %q", result.ValidationStatus)
+	}
+}
+
+func TestDecodeHarvestResponseAcceptsNoSpeechWithEmptyTranscript(t *testing.T) {
+	transcriptPath := filepath.Join(t.TempDir(), "transcript.txt")
+	if err := os.WriteFile(transcriptPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte(`{"contract_version":4,"status":"ok","profile_id":"adaptive-media-v2","validation_status":"no-speech","speech_detected":false}`)
+	result, err := decodeHarvestResponse(payload, transcriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ValidationStatus != harvestValidationNoSpeech || result.SpeechDetected || result.Text != "" {
+		t.Fatalf("unexpected no-speech result: %+v", result)
+	}
+}
+
+func TestDecodeHarvestResponseRejectsConflictingNoSpeech(t *testing.T) {
+	transcriptPath := filepath.Join(t.TempDir(), "transcript.txt")
+	if err := os.WriteFile(transcriptPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, payload := range [][]byte{
+		[]byte(`{"contract_version":4,"status":"ok","profile_id":"adaptive-media-v2","validation_status":"no-speech","speech_detected":true}`),
+		[]byte(`{"contract_version":4,"status":"ok","profile_id":"adaptive-media-v2","validation_status":"no-speech","text":"speech"}`),
+	} {
+		if _, err := decodeHarvestResponse(payload, transcriptPath); err == nil || !strings.Contains(err.Error(), "no-speech result") {
+			t.Fatalf("unexpected error: %v", err)
+		}
 	}
 }
 
