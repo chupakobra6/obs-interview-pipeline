@@ -33,12 +33,12 @@
 - Source: H.265/HEVC через Apple VideoToolbox + три выбранные в OBS AAC-дорожки.
 - Final: тот же video stream без повторной потери качества, если source уже HEVC `1512x982@30`; по умолчанию те же три дорожки в AAC с target 96 Кбит/с либо одна сведённая дорожка при выборе merge.
 - Video compression: fallback-transcode ограничивает полный результат 80% размера source. Для VideoToolbox вычисляется доступный video bitrate после бюджета AAC; двухпроцентный запас покрывает muxing variance.
-- ASR: единый production-вход Telegram Harvest сам выбирает short либо protected long-form по длительности и leading silence. Short-form сохраняет быстрый `no_timestamps` decode, но определяет язык автоматически. Для интервью bounded Silero находит первую и последнюю речь, сохраняет секундный lead-in, физический 15-секундный probe выбирает language policy, после чего один timestamped request ведёт контекст до конца. Harvest проверяет duration/timestamps, хвост и extreme repetition и возвращает contract v4: `profile_id=adaptive-media-v2`; допустимые результаты — `transcribed`, `coverage-validated` и `no-speech`. В последнем случае расшифровка содержит «Речь не обнаружена». OBS не передаёт ASR-настройки и не содержит отдельного профиля.
+- ASR: единый production-вход Telegram Harvest сам выбирает short либо protected long-form по длительности и leading silence. Short-form сохраняет быстрый `no_timestamps` decode, но определяет язык автоматически. Для интервью bounded Silero находит первую и последнюю речь, сохраняет секундный lead-in, физический 15-секундный probe выбирает language policy, после чего timestamped request ведёт контекст до конца. Если корректный ответ пропустил последнюю речь, Harvest один раз перераспознаёт интервал до 45 секунд и заменяет только конечные сегменты, начиная с границы сегмента с контекстом до 20 секунд, сохраняя предыдущий текст. Повтор и итог обязаны пройти прежние проверки покрытия с допуском 2 секунды. Harvest проверяет duration/timestamps, хвост и extreme repetition и возвращает contract v4: `profile_id=adaptive-media-v2`; допустимые результаты — `transcribed`, `coverage-validated` и `no-speech`. В последнем случае расшифровка содержит «Речь не обнаружена». OBS не передаёт ASR-настройки и не содержит отдельного профиля.
 - Уведомление: клик по success notification открывает Finder сразу в каталоге готового собеседования.
 
 ## Установка и проверка
 
-Требуются macOS, OBS Studio, Go 1.26.5, соседний [Telegram Harvest](https://github.com/chupakobra6/telegram-harvest) в `/Users/igor/projects/telegram-harvest` с готовым ASR runtime и `ffmpeg`:
+Требуются macOS, OBS Studio, Go 1.27.2 для сборки, соседний [Telegram Harvest](https://github.com/chupakobra6/telegram-harvest) в `/Users/igor/projects/telegram-harvest` с готовым ASR runtime и `ffmpeg`. `go.mod` закрепляет toolchain; стандартный `GOTOOLCHAIN=auto` загружает его при необходимости:
 
 ```bash
 brew install ffmpeg
