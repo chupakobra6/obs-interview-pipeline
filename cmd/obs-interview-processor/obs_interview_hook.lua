@@ -36,18 +36,15 @@ end
 
 function script_properties()
     local props = obs.obs_properties_create()
-    obs.obs_properties_add_path(props, "processor_path", "Обработчик", obs.OBS_PATH_FILE, "", processor_path)
     obs.obs_properties_add_path(props, "config_path", "Конфигурация", obs.OBS_PATH_FILE, "JSON (*.json)", config_path)
     return props
 end
 
 function script_defaults(settings)
-    obs.obs_data_set_default_string(settings, "processor_path", processor_path)
     obs.obs_data_set_default_string(settings, "config_path", config_path)
 end
 
 function script_update(settings)
-    processor_path = obs.obs_data_get_string(settings, "processor_path")
     config_path = obs.obs_data_get_string(settings, "config_path")
 end
 

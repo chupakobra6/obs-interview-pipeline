@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -9,6 +11,39 @@ import (
 	"github.com/chupakobra6/obs-interview-pipeline/internal/config"
 	"github.com/chupakobra6/obs-interview-pipeline/internal/policy"
 )
+
+func TestOBSHookUsesInstalledWorkerWithObsoleteSavedPath(t *testing.T) {
+	lua, err := exec.LookPath("lua")
+	if err != nil {
+		t.Skip("Lua interpreter is not installed")
+	}
+	worker := installedWorkerPath(config.Default("/Users/igor"))
+	source := strings.ReplaceAll(luaHookTemplate, "__PROCESSOR_PATH__", luaEscape(worker))
+	source = strings.ReplaceAll(source, "__CONFIG_PATH__", "/tmp/default.json")
+	path := filepath.Join(t.TempDir(), "hook.lua")
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(lua, "-", path, worker)
+	command.Stdin = strings.NewReader(`
+local callback, executed
+obslua = {
+    OBS_FRONTEND_EVENT_RECORDING_STOPPED = 1,
+    obs_data_get_string = function(settings, key) return settings[key] end,
+    obs_frontend_add_event_callback = function(value) callback = value end,
+    obs_frontend_get_last_recording = function() return "/tmp/Собес 1.mp4" end,
+    script_log = function() end,
+}
+os.execute = function(value) executed = value; return true end
+dofile(arg[1])
+script_load({processor_path = "/missing/old/obs-interview-processor", config_path = "/tmp/custom.json"})
+callback(obslua.OBS_FRONTEND_EVENT_RECORDING_STOPPED)
+assert(executed == "'" .. arg[2] .. "' prompt --config '/tmp/custom.json' '/tmp/Собес 1.mp4' >/dev/null 2>&1 &", executed)
+`)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("OBS hook used an obsolete saved processor path: %v: %s", err, output)
+	}
+}
 
 func TestNotificationArgsOpenExactFolder(t *testing.T) {
 	args := notificationArgs("Готово", "Видео готово", "/Users/igor/Movies/Interviews/Собес 1")

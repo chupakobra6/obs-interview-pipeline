@@ -24,7 +24,18 @@ import (
 	"github.com/chupakobra6/obs-interview-pipeline/internal/sobestech"
 )
 
-const executableName = "obs-interview-processor"
+const (
+	workerExecutableName   = "OBS обработка записей"
+	importerExecutableName = "SobesTech импорт записей"
+)
+
+func installedWorkerPath(cfg config.Config) string {
+	return filepath.Join(cfg.StateDir, "bin", workerExecutableName)
+}
+
+func installedImporterPath(cfg config.Config) string {
+	return filepath.Join(cfg.StateDir, "bin", importerExecutableName)
+}
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -224,27 +235,30 @@ func install(home string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("locate current executable: %w", err)
 	}
-	installedBin := filepath.Join(cfg.StateDir, "bin", executableName)
-	if err := os.MkdirAll(filepath.Dir(installedBin), 0o700); err != nil {
+	installedWorker := installedWorkerPath(cfg)
+	installedImporter := installedImporterPath(cfg)
+	if err := os.MkdirAll(filepath.Dir(installedWorker), 0o700); err != nil {
 		return fmt.Errorf("create installed bin dir: %w", err)
 	}
-	if err := copyExecutable(currentExecutable, installedBin); err != nil {
-		return err
+	for _, path := range []string{installedWorker, installedImporter} {
+		if err := copyExecutable(currentExecutable, path); err != nil {
+			return err
+		}
 	}
 
 	luaPath := filepath.Join(home, "Library", "Application Support", "obs-studio", "scripts", "obs_interview_hook.lua")
-	lua := strings.ReplaceAll(luaHookTemplate, "__PROCESSOR_PATH__", luaEscape(installedBin))
+	lua := strings.ReplaceAll(luaHookTemplate, "__PROCESSOR_PATH__", luaEscape(installedWorker))
 	lua = strings.ReplaceAll(lua, "__CONFIG_PATH__", luaEscape(cfgPath))
 	if err := writeAtomic(luaPath, []byte(lua), 0o600); err != nil {
 		return fmt.Errorf("install OBS hook: %w", err)
 	}
 
 	plistPath := filepath.Join(home, "Library", "LaunchAgents", config.LaunchAgentLabel+".plist")
-	if err := writeAtomic(plistPath, []byte(launchAgentPlist(installedBin, cfgPath, cfg)), 0o600); err != nil {
+	if err := writeAtomic(plistPath, []byte(launchAgentPlist(installedWorker, cfgPath, cfg)), 0o600); err != nil {
 		return fmt.Errorf("install worker LaunchAgent: %w", err)
 	}
 	importerPlistPath := filepath.Join(home, "Library", "LaunchAgents", config.SobesTechLaunchAgentLabel+".plist")
-	if err := writeAtomic(importerPlistPath, []byte(sobesTechLaunchAgentPlist(installedBin, cfgPath, cfg)), 0o600); err != nil {
+	if err := writeAtomic(importerPlistPath, []byte(sobesTechLaunchAgentPlist(installedImporter, cfgPath, cfg)), 0o600); err != nil {
 		return fmt.Errorf("install SobesTech LaunchAgent: %w", err)
 	}
 	domain := "gui/" + strconv.Itoa(os.Getuid())
@@ -261,7 +275,11 @@ func install(home string, stdout io.Writer) error {
 		}
 		_ = exec.Command("/bin/launchctl", "enable", domain+"/"+agent.label).Run()
 	}
-	fmt.Fprintf(stdout, "installed binary: %s\nconfig: %s\nOBS hook: %s\nworker LaunchAgent: %s\nSobesTech LaunchAgent: %s\n", installedBin, cfgPath, luaPath, plistPath, importerPlistPath)
+	oldBinary := filepath.Join(cfg.StateDir, "bin", "obs-interview-processor")
+	if err := os.Remove(oldBinary); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove replaced installed binary: %w", err)
+	}
+	fmt.Fprintf(stdout, "installed worker: %s\ninstalled importer: %s\nconfig: %s\nOBS hook: %s\nworker LaunchAgent: %s\nSobesTech LaunchAgent: %s\n", installedWorker, installedImporter, cfgPath, luaPath, plistPath, importerPlistPath)
 	return nil
 }
 
@@ -397,7 +415,7 @@ func launchPrompt(cfg config.Config, cfgPath, recording string, discardOnSkip bo
 	if !info.Mode().IsRegular() || info.Size() <= 0 {
 		return fmt.Errorf("recording must be a non-empty regular file")
 	}
-	installedProcessor := filepath.Join(cfg.StateDir, "bin", executableName)
+	installedProcessor := installedWorkerPath(cfg)
 	args := append([]string{"-n", applicationPath(cfg.PromptCommand), "--args"}, promptArgs(installedProcessor, cfgPath, absRecording, cfg.DeleteSourceOnSuccess, discardOnSkip)...)
 	if output, err := exec.Command("/usr/bin/open", args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("launch prompt app: %w: %s", err, oneLineDetail(string(output)))
