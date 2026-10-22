@@ -2,6 +2,9 @@ package processor
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -223,8 +226,9 @@ func TestPipelineFailureKeepsSourceAndPublishesNothing(t *testing.T) {
 			compression := Compression{VideoMode: "copy", AudioMode: policy.AudioPreserve, SourceAudioTracks: 1, OutputAudioTracks: 1, AudioBitrateKbps: 96}
 			return compression, os.WriteFile(output, make([]byte, 500), 0o600)
 		}),
-		Probe:  fakeProbe(source),
-		Remove: os.Remove,
+		Probe:       fakeProbe(source),
+		VerifyAudio: fakeAudioVerifier,
+		Remove:      os.Remove,
 	}
 	if _, err := pipeline.Process(context.Background(), source, policy.Options{AudioMode: policy.AudioPreserve}); err == nil {
 		t.Fatal("Process() succeeded, want failure")
@@ -263,8 +267,9 @@ func TestPipelineRetryReusesValidatedCompressionCheckpoint(t *testing.T) {
 			compression := Compression{VideoMode: "transcode", VideoFilters: []string{"scale=1512:982:flags=lanczos"}, AudioMode: policy.AudioPreserve, SourceAudioTracks: 1, OutputAudioTracks: 1, AudioBitrateKbps: 96}
 			return compression, os.WriteFile(output, make([]byte, 500), 0o600)
 		}),
-		Probe:  fakeProbe(source),
-		Remove: os.Remove,
+		Probe:       fakeProbe(source),
+		VerifyAudio: fakeAudioVerifier,
+		Remove:      os.Remove,
 	}
 	options := policy.Options{AudioMode: policy.AudioPreserve}
 	if _, err := pipeline.Process(context.Background(), source, options); err == nil || !strings.Contains(err.Error(), "retryable ASR failure") {
@@ -317,8 +322,9 @@ func TestPipelineCompressionFinishesBeforeTranscriptionStarts(t *testing.T) {
 			compression := Compression{VideoMode: "transcode", AudioMode: policy.AudioPreserve, SourceAudioTracks: 1, OutputAudioTracks: 1, AudioBitrateKbps: 96}
 			return compression, os.WriteFile(output, make([]byte, 500), 0o600)
 		}),
-		Probe:  fakeProbe(source),
-		Remove: os.Remove,
+		Probe:       fakeProbe(source),
+		VerifyAudio: fakeAudioVerifier,
+		Remove:      os.Remove,
 	}
 	if _, err := pipeline.Process(context.Background(), source, policy.Options{AudioMode: policy.AudioPreserve}); err != nil {
 		t.Fatal(err)
@@ -343,7 +349,8 @@ func TestPipelineKeepsSourceWhenJobDoesNotRequestDeletion(t *testing.T) {
 		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options) (Compression, error) {
 			return Compression{VideoMode: "copy", AudioMode: policy.AudioPreserve, SourceAudioTracks: 1, OutputAudioTracks: 1, AudioBitrateKbps: 96}, os.WriteFile(output, make([]byte, 500), 0o600)
 		}),
-		Probe: fakeProbe(source),
+		Probe:       fakeProbe(source),
+		VerifyAudio: fakeAudioVerifier,
 		Remove: func(string) error {
 			t.Fatal("Remove called for keep-source job")
 			return nil
@@ -392,8 +399,9 @@ func successfulPipeline(cfg config.Config, source string, remove RemoveFunc) Pip
 		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options) (Compression, error) {
 			return Compression{VideoMode: "copy", AudioMode: policy.AudioPreserve, SourceAudioTracks: 1, OutputAudioTracks: 1, AudioBitrateKbps: 96}, os.WriteFile(output, make([]byte, 500), 0o600)
 		}),
-		Probe:  fakeProbe(source),
-		Remove: remove,
+		Probe:       fakeProbe(source),
+		VerifyAudio: fakeAudioVerifier,
+		Remove:      remove,
 	}
 }
 
@@ -485,9 +493,224 @@ func TestFFmpegCommandMergesAllAudioTracks(t *testing.T) {
 		t.Fatalf("unexpected compression: %+v", compression)
 	}
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"[0:a:0][0:a:1][0:a:2]amix=inputs=3", "-map [aout]", "normalize=1"} {
+	for _, want := range []string{"[a0][a1][a2]amix=inputs=3", "-map [aout]", "normalize=0", "volume=1/3", "aresample=48000:async=1:first_pts=0"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("ffmpeg args %q missing %q", joined, want)
 		}
+	}
+}
+
+// Isolated pipeline tests replace media decoding; integration tests use the real verifier.
+func fakeAudioVerifier(_ context.Context, _, input, output string, source, out media.Probe, merge bool) (media.AudioVerification, error) {
+	data, err := os.ReadFile(output)
+	if err != nil {
+		return media.AudioVerification{}, err
+	}
+	digest := sha256.Sum256(data)
+	sourceData, err := os.ReadFile(input)
+	if err != nil {
+		return media.AudioVerification{}, err
+	}
+	sourceDigest := sha256.Sum256(sourceData)
+	sourceSamples := make([]int64, source.AudioCount())
+	outputSamples := make([]int64, out.AudioCount())
+	for i := range sourceSamples {
+		sourceSamples[i] = 480000
+	}
+	for i := range outputSamples {
+		outputSamples[i] = 480000
+	}
+	return media.AudioVerification{
+		Version: media.AudioVerificationVersion, Algorithm: media.AudioVerificationAlgorithm,
+		Complete: true, Merge: merge, SourceTracks: source.AudioCount(), OutputTracks: out.AudioCount(),
+		SampleRate: 48000, WindowMilliseconds: 200, Windows: 50, ActiveWindows: 50,
+		MinimumDurationSeconds: 10, MinimumCorrelation: 1, SourceSamples: sourceSamples, OutputSamples: outputSamples,
+		OutputSHA256: hex.EncodeToString(digest[:]), SourceSHA256: hex.EncodeToString(sourceDigest[:]),
+	}, nil
+}
+
+func TestPipelineAudioLossKeepsSourceBeforePublicationAndTranscription(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig(dir)
+	source := filepath.Join(cfg.AllowedInputDir, "lost-audio.mp4")
+	if err := os.MkdirAll(cfg.AllowedInputDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, make([]byte, 1000), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := successfulPipeline(cfg, source, func(string) error { t.Fatal("source deleted despite failed audio comparison"); return nil })
+	p.VerifyAudio = func(context.Context, string, string, string, media.Probe, media.Probe, bool) (media.AudioVerification, error) {
+		return media.AudioVerification{}, errors.New("output silent after 1950s")
+	}
+	p.Transcriber = transcriberFunc(func(context.Context, string, string) (asr.Result, error) {
+		t.Fatal("ASR ran before audio gate passed")
+		return asr.Result{}, nil
+	})
+	_, err := p.Process(context.Background(), source, policy.Options{DeleteSource: true, AudioMode: policy.AudioPreserve})
+	if err == nil || !strings.Contains(err.Error(), "audio preservation failed") {
+		t.Fatalf("error=%v", err)
+	}
+	if _, err := os.Stat(source); err != nil {
+		t.Fatalf("source not kept: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.OutputDir, "lost-audio")); !os.IsNotExist(err) {
+		t.Fatalf("bad output published: %v", err)
+	}
+}
+
+func TestPipelineRefusesDeletionWhenPublishedMediaChangesWithoutProbeChange(t *testing.T) {
+	for _, absent := range []bool{false, true} {
+		t.Run(map[bool]string{false: "source-present", true: "source-absent"}[absent], func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := testConfig(dir)
+			source := filepath.Join(cfg.AllowedInputDir, "changed-output.mp4")
+			if err := os.MkdirAll(cfg.AllowedInputDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(source, make([]byte, 1000), 0600); err != nil {
+				t.Fatal(err)
+			}
+			p := successfulPipeline(cfg, source, func(string) error { return errors.New("delete denied") })
+			opts := policy.Options{DeleteSource: true, AudioMode: policy.AudioPreserve}
+			if _, err := p.Process(context.Background(), source, opts); err == nil {
+				t.Fatal("expected delete failure")
+			}
+			video := filepath.Join(cfg.OutputDir, "changed-output", "recording.mp4")
+			changed := make([]byte, 500)
+			changed[3] = 1
+			if err := os.WriteFile(video, changed, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if absent {
+				if err := os.Remove(source); err != nil {
+					t.Fatal(err)
+				}
+			}
+			p.Remove = func(string) error { t.Fatal("deletion attempted for unverified bytes"); return nil }
+			if _, err := p.Process(context.Background(), source, opts); err == nil || !strings.Contains(err.Error(), "audio preservation proof") {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestPipelineLegacyManifestCannotAuthorizeDeletion(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig(dir)
+	source := filepath.Join(cfg.AllowedInputDir, "legacy.mp4")
+	if err := os.MkdirAll(cfg.AllowedInputDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, make([]byte, 1000), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := successfulPipeline(cfg, source, func(string) error { return errors.New("delete denied") })
+	opts := policy.Options{DeleteSource: true, AudioMode: policy.AudioPreserve}
+	if _, err := p.Process(context.Background(), source, opts); err == nil {
+		t.Fatal("expected delete failure")
+	}
+	path := filepath.Join(cfg.OutputDir, "legacy", "manifest.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var old map[string]any
+	if err := json.Unmarshal(data, &old); err != nil {
+		t.Fatal(err)
+	}
+	old["version"] = 3
+	delete(old, "audio_verification")
+	data, err = json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	p.Remove = func(string) error { t.Fatal("legacy manifest authorized deletion"); return nil }
+	if _, err := p.Process(context.Background(), source, opts); err == nil || !strings.Contains(err.Error(), "manifest version") {
+		t.Fatalf("error=%v", err)
+	}
+	if _, err := os.Stat(source); err != nil {
+		t.Fatalf("source not kept: %v", err)
+	}
+}
+
+func TestPipelineRefusesDeletionForChangedSourceBytesWithSameIdentity(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig(dir)
+	source := filepath.Join(cfg.AllowedInputDir, "changed-source-content.mp4")
+	if err := os.MkdirAll(cfg.AllowedInputDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, make([]byte, 1000), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := successfulPipeline(cfg, source, func(string) error { return errors.New("delete denied") })
+	opts := policy.Options{DeleteSource: true, AudioMode: policy.AudioPreserve}
+	if _, err := p.Process(context.Background(), source, opts); err == nil {
+		t.Fatal("expected deletion failure")
+	}
+	before, err := inspectSourceIdentity(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := make([]byte, 1000)
+	changed[7] = 1
+	if err := os.WriteFile(source, changed, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(source, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := inspectSourceIdentity(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatal("fixture must preserve identity, size and mtime")
+	}
+	p.Remove = func(string) error { t.Fatal("changed source was deleted"); return nil }
+	if _, err := p.Process(context.Background(), source, opts); err == nil || !strings.Contains(err.Error(), "source content changed") {
+		t.Fatalf("error=%v", err)
+	}
+	if got, err := os.ReadFile(source); err != nil || got[7] != 1 {
+		t.Fatalf("changed source missing: %v", err)
+	}
+}
+
+func TestPipelineRefusesPublicationWhenASRStageChangesOutput(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig(dir)
+	source := filepath.Join(cfg.AllowedInputDir, "changed-during-asr.mp4")
+	if err := os.MkdirAll(cfg.AllowedInputDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, make([]byte, 1000), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := successfulPipeline(cfg, source, func(string) error { t.Fatal("unverified source deletion"); return nil })
+	p.Transcriber = transcriberFunc(func(_ context.Context, _ string, work string) (asr.Result, error) {
+		video := filepath.Join(filepath.Dir(work), "recording.mp4")
+		changed := make([]byte, 500)
+		changed[0] = 1
+		if err := os.WriteFile(video, changed, 0600); err != nil {
+			return asr.Result{}, err
+		}
+		return asr.Result{Text: "Тест.", SpeechDetected: true, MetalConfirmed: true}, nil
+	})
+	if _, err := p.Process(context.Background(), source, policy.Options{AudioMode: policy.AudioPreserve}); err == nil || !strings.Contains(err.Error(), "output changed during processing") {
+		t.Fatalf("error=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.OutputDir, "changed-during-asr")); !os.IsNotExist(err) {
+		t.Fatalf("unverified output published: %v", err)
+	}
+	if _, err := os.Stat(source); err != nil {
+		t.Fatalf("source missing: %v", err)
 	}
 }

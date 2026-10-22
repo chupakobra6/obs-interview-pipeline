@@ -2,6 +2,7 @@ package processor
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/chupakobra6/obs-interview-pipeline/internal/asr"
 	"github.com/chupakobra6/obs-interview-pipeline/internal/config"
+	"github.com/chupakobra6/obs-interview-pipeline/internal/media"
 	"github.com/chupakobra6/obs-interview-pipeline/internal/policy"
 )
 
@@ -65,6 +67,37 @@ func TestDisposableFFmpegIntegration(t *testing.T) {
 				t.Fatalf("pad synthetic source: %v, %v", writeErr, closeErr)
 			}
 			pipeline := New(cfg)
+			if test.audioMode == policy.AudioMerge {
+				// Reproduce a full-length AAC stream that loses only its tail.
+				// Metadata checks still pass; the original must survive the gate.
+				realCompressor := pipeline.Compressor
+				pipeline.Compressor = compressorFunc(func(ctx context.Context, input, output string, probe media.Probe, opts policy.Options) (Compression, error) {
+					compression, err := realCompressor.Compress(ctx, input, output, probe, opts)
+					if err != nil {
+						return compression, err
+					}
+					muted := output + ".muted.mp4"
+					args := []string{"-nostdin", "-v", "error", "-y", "-i", output, "-map", "0", "-c:v", "copy", "-c:a", "aac", "-b:a", "96k", "-af", "volume=0:enable='gte(t,3)'", muted}
+					if out, err := exec.CommandContext(ctx, cfg.FFmpegCommand, args...).CombinedOutput(); err != nil {
+						return compression, fmt.Errorf("create truncated audio: %w: %s", err, out)
+					}
+					return compression, os.Rename(muted, output)
+				})
+				pipeline.Transcriber = transcriberFunc(func(context.Context, string, string) (asr.Result, error) {
+					t.Fatal("ASR started with lost audio")
+					return asr.Result{}, nil
+				})
+				if _, err := pipeline.Process(context.Background(), source, policy.Options{DeleteSource: true, AudioMode: test.audioMode}); err == nil || !strings.Contains(err.Error(), "audio preservation failed") {
+					t.Fatalf("lost tail passed audio gate: %v", err)
+				}
+				if _, err := os.Stat(source); err != nil {
+					t.Fatalf("audio loss deleted source: %v", err)
+				}
+				if _, err := os.Stat(filepath.Join(cfg.OutputDir, "synthetic-"+test.name)); !os.IsNotExist(err) {
+					t.Fatalf("bad audio was published: %v", err)
+				}
+				pipeline.Compressor = realCompressor
+			}
 			pipeline.Transcriber = transcriberFunc(func(context.Context, string, string) (asr.Result, error) {
 				return asr.Result{Text: "Синтетическая расшифровка.", SpeechDetected: true, MetalConfirmed: true}, nil
 			})

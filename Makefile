@@ -4,7 +4,7 @@ SWIFT_SOURCES := cmd/obs-interview-processor/obs_interview_notifier.swift cmd/ob
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup build fmt fmt-check swift-check test test-race check install doctor clean
+.PHONY: help setup build fmt fmt-check swift-check test test-audio test-audio-long test-race check install doctor clean
 
 help:
 	@printf "Available commands:\n"
@@ -13,6 +13,8 @@ help:
 	@printf "  make fmt        # format Go sources\n"
 	@printf "  make swift-check # type-check the native macOS notifier and prompt\n"
 	@printf "  make test       # run unit and disposable integration tests\n"
+	@printf "  make test-audio # audio preservation, deletion guards, disposable recordings\n"
+	@printf "  make test-audio-long # explicit 33-minute media fixture, short microphone\n"
 	@printf "  make test-race  # run all tests with the race detector\n"
 	@printf "  make check      # formatting, module, vet, and test validation\n"
 	@printf "  make install    # install worker, OBS hook, config, and LaunchAgent\n"
@@ -40,6 +42,12 @@ swift-check:
 
 test:
 	go test ./...
+
+test-audio:
+	go test ./internal/media ./internal/processor -run 'Audio|PublishedMedia|LegacyManifest|DisposableFFmpeg'
+
+test-audio-long:
+	OBS_AUDIO_LONG_TEST=1 go test -v ./internal/processor -run '^TestDisposableLongAudioIntegration$$' -timeout 10m
 
 test-race:
 	go test -race ./...

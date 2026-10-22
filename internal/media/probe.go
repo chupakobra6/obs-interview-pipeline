@@ -18,6 +18,7 @@ type Stream struct {
 	Height       int    `json:"height,omitempty"`
 	AvgFrameRate string `json:"avg_frame_rate,omitempty"`
 	BitRate      string `json:"bit_rate,omitempty"`
+	Channels     int    `json:"channels,omitempty"`
 }
 
 type Format struct {
@@ -33,7 +34,7 @@ type Probe struct {
 func Inspect(ctx context.Context, ffprobeCommand, path string) (Probe, error) {
 	args := []string{
 		"-v", "error",
-		"-show_entries", "format=duration,size:stream=index,codec_type,codec_name,width,height,avg_frame_rate,bit_rate",
+		"-show_entries", "format=duration,size:stream=index,codec_type,codec_name,width,height,avg_frame_rate,bit_rate,channels",
 		"-of", "json",
 		path,
 	}

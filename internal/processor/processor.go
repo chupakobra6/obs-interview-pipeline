@@ -22,8 +22,8 @@ import (
 )
 
 const (
-	manifestVersion              = 3
-	compressionCheckpointVersion = 1
+	manifestVersion              = 4
+	compressionCheckpointVersion = 2
 	minimumCompressionTimeout    = 2 * time.Minute
 	minimumTranscriptionTimeout  = 3 * time.Minute
 )
@@ -101,10 +101,14 @@ func (c FFmpegCompressor) command(inputPath, outputPath string, source media.Pro
 	}
 	if options.AudioMode == policy.AudioMerge && source.AudioCount() > 1 {
 		inputs := make([]string, 0, source.AudioCount())
+		preparation := make([]string, 0, source.AudioCount())
 		for index := 0; index < source.AudioCount(); index++ {
-			inputs = append(inputs, fmt.Sprintf("[0:a:%d]", index))
+			preparation = append(preparation, fmt.Sprintf("[0:a:%d]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo[a%d]", index, index))
+			inputs = append(inputs, fmt.Sprintf("[a%d]", index))
 		}
-		audioFilter := fmt.Sprintf("%samix=inputs=%d:duration=longest:dropout_transition=0:normalize=1[aout]", strings.Join(inputs, ""), source.AudioCount())
+		// A fixed gain keeps the remaining tracks at the same level when a
+		// microphone track ends. Verification mixes decoded tracks independently.
+		audioFilter := strings.Join(preparation, ";") + fmt.Sprintf(";%samix=inputs=%d:duration=longest:normalize=0,volume=1/%d[aout]", strings.Join(inputs, ""), source.AudioCount(), source.AudioCount())
 		args = append(args, "-filter_complex", audioFilter, "-map", "[aout]")
 	} else if options.AudioMode == policy.AudioMerge {
 		args = append(args, "-map", "0:a:0")
@@ -158,6 +162,7 @@ func (c FFmpegCompressor) videoBitrateKbps(source media.Probe, outputAudioTracks
 
 type ProbeFunc func(context.Context, string, string) (media.Probe, error)
 type RemoveFunc func(string) error
+type AudioVerifyFunc func(context.Context, string, string, string, media.Probe, media.Probe, bool) (media.AudioVerification, error)
 
 type Pipeline struct {
 	Config      config.Config
@@ -165,32 +170,35 @@ type Pipeline struct {
 	Compressor  Compressor
 	Probe       ProbeFunc
 	Remove      RemoveFunc
+	VerifyAudio AudioVerifyFunc
 }
 
 type Result struct {
-	SourcePath     string         `json:"source_path"`
-	FinalDir       string         `json:"final_dir"`
-	VideoPath      string         `json:"video_path"`
-	TranscriptPath string         `json:"transcript_path"`
-	ManifestPath   string         `json:"manifest_path"`
-	SourceBytes    int64          `json:"source_bytes"`
-	OutputBytes    int64          `json:"output_bytes"`
-	ASR            asr.Result     `json:"asr"`
-	Compression    Compression    `json:"compression"`
-	Options        policy.Options `json:"options"`
-	CompletedAt    time.Time      `json:"completed_at"`
+	SourcePath        string                  `json:"source_path"`
+	FinalDir          string                  `json:"final_dir"`
+	VideoPath         string                  `json:"video_path"`
+	TranscriptPath    string                  `json:"transcript_path"`
+	ManifestPath      string                  `json:"manifest_path"`
+	SourceBytes       int64                   `json:"source_bytes"`
+	OutputBytes       int64                   `json:"output_bytes"`
+	ASR               asr.Result              `json:"asr"`
+	Compression       Compression             `json:"compression"`
+	AudioVerification media.AudioVerification `json:"audio_verification"`
+	Options           policy.Options          `json:"options"`
+	CompletedAt       time.Time               `json:"completed_at"`
 }
 
 type manifest struct {
-	Version        int            `json:"version"`
-	SourcePath     string         `json:"source_path"`
-	SourceIdentity sourceIdentity `json:"source_identity"`
-	SourceProbe    media.Probe    `json:"source_probe"`
-	OutputProbe    media.Probe    `json:"output_probe"`
-	ASR            asr.Result     `json:"asr"`
-	Compression    Compression    `json:"compression"`
-	Options        policy.Options `json:"options"`
-	CompletedAt    time.Time      `json:"completed_at"`
+	Version           int                     `json:"version"`
+	SourcePath        string                  `json:"source_path"`
+	SourceIdentity    sourceIdentity          `json:"source_identity"`
+	SourceProbe       media.Probe             `json:"source_probe"`
+	OutputProbe       media.Probe             `json:"output_probe"`
+	ASR               asr.Result              `json:"asr"`
+	Compression       Compression             `json:"compression"`
+	AudioVerification media.AudioVerification `json:"audio_verification"`
+	Options           policy.Options          `json:"options"`
+	CompletedAt       time.Time               `json:"completed_at"`
 }
 
 type sourceIdentity struct {
@@ -209,14 +217,15 @@ type compressionSettings struct {
 }
 
 type compressionCheckpoint struct {
-	Version        int                 `json:"version"`
-	SourcePath     string              `json:"source_path"`
-	SourceIdentity sourceIdentity      `json:"source_identity"`
-	SourceProbe    media.Probe         `json:"source_probe"`
-	OutputProbe    media.Probe         `json:"output_probe"`
-	Compression    Compression         `json:"compression"`
-	Options        policy.Options      `json:"options"`
-	Settings       compressionSettings `json:"settings"`
+	Version           int                     `json:"version"`
+	SourcePath        string                  `json:"source_path"`
+	SourceIdentity    sourceIdentity          `json:"source_identity"`
+	SourceProbe       media.Probe             `json:"source_probe"`
+	OutputProbe       media.Probe             `json:"output_probe"`
+	Compression       Compression             `json:"compression"`
+	AudioVerification media.AudioVerification `json:"audio_verification"`
+	Options           policy.Options          `json:"options"`
+	Settings          compressionSettings     `json:"settings"`
 }
 
 func New(cfg config.Config) Pipeline {
@@ -226,6 +235,7 @@ func New(cfg config.Config) Pipeline {
 		Compressor:  FFmpegCompressor{Config: cfg},
 		Probe:       media.Inspect,
 		Remove:      os.Remove,
+		VerifyAudio: media.VerifyAudio,
 	}
 }
 
@@ -281,7 +291,7 @@ func (p Pipeline) Process(ctx context.Context, inputPath string, options policy.
 		}
 	}()
 
-	compression, outputProbe, err := p.ensureCompression(
+	compression, outputProbe, audioVerification, err := p.ensureCompression(
 		ctx,
 		resolvedInput,
 		tempDir,
@@ -313,15 +323,16 @@ func (p Pipeline) Process(ctx context.Context, inputPath string, options policy.
 	}
 	completedAt := time.Now()
 	manifestValue := manifest{
-		Version:        manifestVersion,
-		SourcePath:     resolvedInput,
-		SourceIdentity: initialSourceIdentity,
-		SourceProbe:    sourceProbe,
-		OutputProbe:    outputProbe,
-		ASR:            asrResult,
-		Compression:    compression,
-		Options:        options,
-		CompletedAt:    completedAt,
+		Version:           manifestVersion,
+		SourcePath:        resolvedInput,
+		SourceIdentity:    initialSourceIdentity,
+		SourceProbe:       sourceProbe,
+		OutputProbe:       outputProbe,
+		ASR:               asrResult,
+		Compression:       compression,
+		AudioVerification: audioVerification,
+		Options:           options,
+		CompletedAt:       completedAt,
 	}
 	if err := writeJSON(tempManifest, manifestValue); err != nil {
 		return Result{}, err
@@ -347,6 +358,12 @@ func (p Pipeline) Process(ctx context.Context, inputPath string, options policy.
 	if err := validateSourceIdentity(resolvedInput, initialSourceIdentity); err != nil {
 		return Result{}, fmt.Errorf("source changed during processing: %w", err)
 	}
+	if err := audioVerification.ValidateSource(ctx, resolvedInput); err != nil {
+		return Result{}, fmt.Errorf("source content changed during processing: %w", err)
+	}
+	if err := audioVerification.ValidateOutput(ctx, tempVideo); err != nil {
+		return Result{}, fmt.Errorf("output changed during processing; source kept: %w", err)
+	}
 	if err := os.Rename(tempDir, finalDir); err != nil {
 		return Result{}, fmt.Errorf("publish processed recording: %w", err)
 	}
@@ -355,22 +372,29 @@ func (p Pipeline) Process(ctx context.Context, inputPath string, options policy.
 		return Result{}, err
 	}
 	if options.DeleteSource {
+		if err := audioVerification.ValidateOutput(ctx, finalVideo); err != nil {
+			return Result{}, fmt.Errorf("outputs published but source kept: audio verification failed before deletion: %w", err)
+		}
+		if err := audioVerification.ValidateSource(ctx, resolvedInput); err != nil {
+			return Result{}, fmt.Errorf("outputs published but source kept: source audio verification failed before deletion: %w", err)
+		}
 		if err := removeSourceIfUnchanged(resolvedInput, initialSourceIdentity, p.Remove); err != nil {
 			return Result{}, fmt.Errorf("processed outputs published but source deletion failed: %w", err)
 		}
 	}
 	return Result{
-		SourcePath:     resolvedInput,
-		FinalDir:       finalDir,
-		VideoPath:      finalVideo,
-		TranscriptPath: finalTranscript,
-		ManifestPath:   finalManifest,
-		SourceBytes:    sourceProbe.SizeBytes(),
-		OutputBytes:    outputProbe.SizeBytes(),
-		ASR:            asrResult,
-		Compression:    compression,
-		Options:        options,
-		CompletedAt:    completedAt,
+		SourcePath:        resolvedInput,
+		FinalDir:          finalDir,
+		VideoPath:         finalVideo,
+		TranscriptPath:    finalTranscript,
+		ManifestPath:      finalManifest,
+		SourceBytes:       sourceProbe.SizeBytes(),
+		OutputBytes:       outputProbe.SizeBytes(),
+		ASR:               asrResult,
+		Compression:       compression,
+		AudioVerification: audioVerification,
+		Options:           options,
+		CompletedAt:       completedAt,
 	}, nil
 }
 
@@ -388,16 +412,16 @@ func (p Pipeline) ensureCompression(
 	sourceIdentity sourceIdentity,
 	sourceProbe media.Probe,
 	options policy.Options,
-) (Compression, media.Probe, error) {
+) (Compression, media.Probe, media.AudioVerification, error) {
 	settings := p.compressionSettings()
 	if checkpoint, ok := p.validCompressionCheckpoint(ctx, checkpointPath, videoPath, inputPath, sourceIdentity, sourceProbe, options, settings); ok {
-		return checkpoint.Compression, checkpoint.OutputProbe, nil
+		return checkpoint.Compression, checkpoint.OutputProbe, checkpoint.AudioVerification, nil
 	}
 	if err := os.RemoveAll(tempDir); err != nil {
-		return Compression{}, media.Probe{}, fmt.Errorf("reset stale processing directory: %w", err)
+		return Compression{}, media.Probe{}, media.AudioVerification{}, fmt.Errorf("reset stale processing directory: %w", err)
 	}
 	if err := os.MkdirAll(tempDir, 0o700); err != nil {
-		return Compression{}, media.Probe{}, fmt.Errorf("recreate processing directory: %w", err)
+		return Compression{}, media.Probe{}, media.AudioVerification{}, fmt.Errorf("recreate processing directory: %w", err)
 	}
 
 	timeout := compressionTimeout(sourceProbe.DurationSeconds())
@@ -407,43 +431,59 @@ func (p Pipeline) ensureCompression(
 	cancel()
 	if err != nil {
 		if errors.Is(contextErr, context.DeadlineExceeded) {
-			return Compression{}, media.Probe{}, fmt.Errorf("compression exceeded %s safety timeout: %w", timeout, err)
+			return Compression{}, media.Probe{}, media.AudioVerification{}, fmt.Errorf("compression exceeded %s safety timeout: %w", timeout, err)
 		}
-		return Compression{}, media.Probe{}, err
+		return Compression{}, media.Probe{}, media.AudioVerification{}, err
 	}
 	outputProbe, err := p.Probe(ctx, p.Config.FFprobeCommand, videoPath)
 	if err != nil {
-		return Compression{}, media.Probe{}, fmt.Errorf("probe compressed output: %w", err)
+		return Compression{}, media.Probe{}, media.AudioVerification{}, fmt.Errorf("probe compressed output: %w", err)
 	}
 	if err := media.ValidateCompressed(sourceProbe, outputProbe, p.Config.OutputWidth, p.Config.OutputHeight, p.Config.OutputFPS, p.Config.AudioBitrateKbps, compression.OutputAudioTracks); err != nil {
-		return Compression{}, media.Probe{}, fmt.Errorf("validate compressed output: %w", err)
+		return Compression{}, media.Probe{}, media.AudioVerification{}, fmt.Errorf("validate compressed output: %w", err)
 	}
 	if err := media.ValidateSizeLimit(sourceProbe, outputProbe, p.Config.MaxOutputSizePercent); err != nil {
-		return Compression{}, media.Probe{}, fmt.Errorf("validate compressed output: %w", err)
+		return Compression{}, media.Probe{}, media.AudioVerification{}, fmt.Errorf("validate compressed output: %w", err)
+	}
+	if p.VerifyAudio == nil {
+		return Compression{}, media.Probe{}, media.AudioVerification{}, fmt.Errorf("audio verifier is unavailable; source must be kept")
+	}
+	verifyCtx, cancelVerify := context.WithTimeout(ctx, compressionTimeout(sourceProbe.DurationSeconds()))
+	audioVerification, err := p.VerifyAudio(verifyCtx, p.Config.FFmpegCommand, inputPath, videoPath, sourceProbe, outputProbe, options.AudioMode == policy.AudioMerge)
+	cancelVerify()
+	if err != nil {
+		return Compression{}, media.Probe{}, media.AudioVerification{}, fmt.Errorf("audio preservation failed; source kept: %w", err)
+	}
+	if audioVerification.SourceTracks != sourceProbe.AudioCount() || audioVerification.OutputTracks != outputProbe.AudioCount() || audioVerification.Merge != (options.AudioMode == policy.AudioMerge) {
+		return Compression{}, media.Probe{}, media.AudioVerification{}, fmt.Errorf("audio verification does not cover the selected tracks; source kept")
+	}
+	if err := audioVerification.ValidateOutput(ctx, videoPath); err != nil {
+		return Compression{}, media.Probe{}, media.AudioVerification{}, fmt.Errorf("invalid audio verification; source kept: %w", err)
 	}
 	checkpoint := compressionCheckpoint{
-		Version:        compressionCheckpointVersion,
-		SourcePath:     inputPath,
-		SourceIdentity: sourceIdentity,
-		SourceProbe:    sourceProbe,
-		OutputProbe:    outputProbe,
-		Compression:    compression,
-		Options:        options,
-		Settings:       settings,
+		Version:           compressionCheckpointVersion,
+		SourcePath:        inputPath,
+		SourceIdentity:    sourceIdentity,
+		SourceProbe:       sourceProbe,
+		OutputProbe:       outputProbe,
+		Compression:       compression,
+		AudioVerification: audioVerification,
+		Options:           options,
+		Settings:          settings,
 	}
 	if err := syncFile(videoPath); err != nil {
-		return Compression{}, media.Probe{}, err
+		return Compression{}, media.Probe{}, media.AudioVerification{}, err
 	}
 	if err := writeJSON(checkpointPath, checkpoint); err != nil {
-		return Compression{}, media.Probe{}, fmt.Errorf("write compression checkpoint: %w", err)
+		return Compression{}, media.Probe{}, media.AudioVerification{}, fmt.Errorf("write compression checkpoint: %w", err)
 	}
 	if err := syncFile(checkpointPath); err != nil {
-		return Compression{}, media.Probe{}, err
+		return Compression{}, media.Probe{}, media.AudioVerification{}, err
 	}
 	if err := syncDir(tempDir); err != nil {
-		return Compression{}, media.Probe{}, err
+		return Compression{}, media.Probe{}, media.AudioVerification{}, err
 	}
-	return compression, outputProbe, nil
+	return compression, outputProbe, audioVerification, nil
 }
 
 func (p Pipeline) validCompressionCheckpoint(
@@ -480,6 +520,9 @@ func (p Pipeline) validCompressionCheckpoint(
 		checkpoint.Compression.AudioBitrateKbps != settings.AudioBitrateKbps {
 		return compressionCheckpoint{}, false
 	}
+	if checkpoint.AudioVerification.SourceTracks != sourceProbe.AudioCount() || checkpoint.AudioVerification.OutputTracks != expectedAudioTracks || checkpoint.AudioVerification.Merge != (options.AudioMode == policy.AudioMerge) {
+		return compressionCheckpoint{}, false
+	}
 	actualOutput, err := p.Probe(ctx, p.Config.FFprobeCommand, videoPath)
 	if err != nil || !reflect.DeepEqual(actualOutput, checkpoint.OutputProbe) {
 		return compressionCheckpoint{}, false
@@ -488,6 +531,12 @@ func (p Pipeline) validCompressionCheckpoint(
 		return compressionCheckpoint{}, false
 	}
 	if err := media.ValidateSizeLimit(sourceProbe, actualOutput, p.Config.MaxOutputSizePercent); err != nil {
+		return compressionCheckpoint{}, false
+	}
+	if err := checkpoint.AudioVerification.ValidateOutput(ctx, videoPath); err != nil {
+		return compressionCheckpoint{}, false
+	}
+	if err := checkpoint.AudioVerification.ValidateSource(ctx, inputPath); err != nil {
 		return compressionCheckpoint{}, false
 	}
 	return checkpoint, true
@@ -550,6 +599,12 @@ func (p Pipeline) finishExisting(ctx context.Context, inputPath, finalDir, video
 	if !reflect.DeepEqual(currentOutput, saved.OutputProbe) {
 		return Result{}, fmt.Errorf("existing output media probe differs from its manifest")
 	}
+	if saved.AudioVerification.SourceTracks != saved.SourceProbe.AudioCount() || saved.AudioVerification.OutputTracks != currentOutput.AudioCount() || saved.AudioVerification.Merge != (options.AudioMode == policy.AudioMerge) {
+		return Result{}, fmt.Errorf("existing audio verification does not cover the selected tracks; source kept")
+	}
+	if err := saved.AudioVerification.ValidateOutput(ctx, videoPath); err != nil {
+		return Result{}, fmt.Errorf("existing output lacks valid audio preservation proof; source kept: %w", err)
+	}
 	currentIdentity, identityErr := inspectSourceIdentity(inputPath)
 	if errors.Is(identityErr, os.ErrNotExist) {
 		if !options.DeleteSource {
@@ -580,6 +635,9 @@ func (p Pipeline) finishExisting(ctx context.Context, inputPath, finalDir, video
 		return Result{}, fmt.Errorf("validate existing compressed output: %w", err)
 	}
 	if options.DeleteSource {
+		if err := saved.AudioVerification.ValidateSource(ctx, inputPath); err != nil {
+			return Result{}, fmt.Errorf("source content changed since audio verification; source kept: %w", err)
+		}
 		if err := removeSourceIfUnchanged(inputPath, saved.SourceIdentity, p.Remove); err != nil {
 			return Result{}, fmt.Errorf("delete source after existing output validation: %w", err)
 		}
@@ -589,17 +647,18 @@ func (p Pipeline) finishExisting(ctx context.Context, inputPath, finalDir, video
 
 func resultFromManifest(inputPath, finalDir, videoPath, transcriptPath, manifestPath string, saved manifest, output media.Probe) Result {
 	return Result{
-		SourcePath:     inputPath,
-		FinalDir:       finalDir,
-		VideoPath:      videoPath,
-		TranscriptPath: transcriptPath,
-		ManifestPath:   manifestPath,
-		SourceBytes:    saved.SourceProbe.SizeBytes(),
-		OutputBytes:    output.SizeBytes(),
-		ASR:            saved.ASR,
-		Compression:    saved.Compression,
-		Options:        saved.Options,
-		CompletedAt:    saved.CompletedAt,
+		SourcePath:        inputPath,
+		FinalDir:          finalDir,
+		VideoPath:         videoPath,
+		TranscriptPath:    transcriptPath,
+		ManifestPath:      manifestPath,
+		SourceBytes:       saved.SourceProbe.SizeBytes(),
+		OutputBytes:       output.SizeBytes(),
+		ASR:               saved.ASR,
+		Compression:       saved.Compression,
+		AudioVerification: saved.AudioVerification,
+		Options:           saved.Options,
+		CompletedAt:       saved.CompletedAt,
 	}
 }
 

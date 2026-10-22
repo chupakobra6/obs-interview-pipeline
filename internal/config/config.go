@@ -63,7 +63,7 @@ func Default(home string) Config {
 		OutputFPS:              30,
 		MaxOutputSizePercent:   80,
 		AudioBitrateKbps:       96,
-		DeleteSourceOnSuccess:  true,
+		DeleteSourceOnSuccess:  false,
 		Notifications:          true,
 	}
 }
