@@ -35,25 +35,38 @@ func TestDisposableFFmpegIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, test := range []struct {
-		name         string
-		audioMode    string
-		outputTracks int
+		name            string
+		audioMode       string
+		outputTracks    int
+		shortMicrophone bool
+		sourceTracks    int
 	}{
-		{name: "preserve", audioMode: policy.AudioPreserve, outputTracks: 3},
-		{name: "merge", audioMode: policy.AudioMerge, outputTracks: 1},
+		{name: "preserve", audioMode: policy.AudioPreserve, outputTracks: 3, sourceTracks: 3},
+		{name: "merge", audioMode: policy.AudioMerge, outputTracks: 1, sourceTracks: 3},
+		{name: "merge-short-microphone", audioMode: policy.AudioMerge, outputTracks: 1, shortMicrophone: true, sourceTracks: 3},
+		{name: "merge-single", audioMode: policy.AudioMerge, outputTracks: 1, sourceTracks: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			source := filepath.Join(cfg.AllowedInputDir, "synthetic-"+test.name+".mp4")
+			microphone := "sine=frequency=550:sample_rate=48000"
+			if test.shortMicrophone {
+				microphone += ":duration=2"
+			}
 			args := []string{
 				"-hide_banner", "-loglevel", "error", "-y",
 				"-f", "lavfi", "-i", "color=c=0x20242b:size=1512x982:rate=30",
 				"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
-				"-f", "lavfi", "-i", "sine=frequency=550:sample_rate=48000",
+				"-f", "lavfi", "-i", microphone,
 				"-f", "lavfi", "-i", "sine=frequency=660:sample_rate=48000",
-				"-t", "6", "-map", "0:v:0", "-map", "1:a:0", "-map", "2:a:0", "-map", "3:a:0",
+				"-t", "6", "-map", "0:v:0",
+			}
+			for index := 0; index < test.sourceTracks; index++ {
+				args = append(args, "-map", fmt.Sprintf("%d:a:0", index+1))
+			}
+			args = append(args,
 				"-c:v", "hevc_videotoolbox", "-b:v", "2500k", "-constant_bit_rate", "1",
 				"-c:a", "aac", "-b:a", "160k", source,
-			}
+			)
 			if output, err := exec.Command(cfg.FFmpegCommand, args...).CombinedOutput(); err != nil {
 				t.Fatalf("create synthetic recording: %v: %s", err, output)
 			}
@@ -67,17 +80,17 @@ func TestDisposableFFmpegIntegration(t *testing.T) {
 				t.Fatalf("pad synthetic source: %v, %v", writeErr, closeErr)
 			}
 			pipeline := New(cfg)
-			if test.audioMode == policy.AudioMerge {
+			if test.audioMode == policy.AudioMerge && !test.shortMicrophone && test.sourceTracks > 1 {
 				// Reproduce a full-length AAC stream that loses only its tail.
 				// Metadata checks still pass; the original must survive the gate.
 				realCompressor := pipeline.Compressor
-				pipeline.Compressor = compressorFunc(func(ctx context.Context, input, output string, probe media.Probe, opts policy.Options) (Compression, error) {
-					compression, err := realCompressor.Compress(ctx, input, output, probe, opts)
+				pipeline.Compressor = compressorFunc(func(ctx context.Context, input, output string, probe media.Probe, opts policy.Options, settings EncodeSettings) (Compression, error) {
+					compression, err := realCompressor.Compress(ctx, input, output, probe, opts, settings)
 					if err != nil {
 						return compression, err
 					}
 					muted := output + ".muted.mp4"
-					args := []string{"-nostdin", "-v", "error", "-y", "-i", output, "-map", "0", "-c:v", "copy", "-c:a", "aac", "-b:a", "96k", "-af", "volume=0:enable='gte(t,3)'", muted}
+					args := []string{"-nostdin", "-v", "error", "-y", "-i", output, "-map", "0", "-c:v", "copy", "-c:a", "aac", "-b:a", fmt.Sprintf("%dk", settings.AudioBitrateKbps), "-af", "volume=0:enable='gte(t,3)'", muted}
 					if out, err := exec.CommandContext(ctx, cfg.FFmpegCommand, args...).CombinedOutput(); err != nil {
 						return compression, fmt.Errorf("create truncated audio: %w: %s", err, out)
 					}
@@ -107,6 +120,14 @@ func TestDisposableFFmpegIntegration(t *testing.T) {
 			}
 			if _, err := os.Stat(source); !os.IsNotExist(err) {
 				t.Fatalf("source was not deleted: %v", err)
+			}
+			if test.shortMicrophone {
+				// The independent PCM reference checks all three distinct input tones,
+				// including the two long tracks after the middle decoder reaches EOF.
+				proof := result.AudioVerification
+				if !proof.Complete || len(proof.SourceSamples) != 3 || proof.SourceSamples[1] > 3*48000 || proof.SourceSamples[0] < 5*48000 || proof.SourceSamples[2] < 5*48000 || proof.OutputSamples[0] < 5*48000 {
+					t.Fatalf("separate merge inputs did not retain their independent EOFs: %+v", proof)
+				}
 			}
 			if result.OutputBytes >= result.SourceBytes {
 				t.Fatalf("output did not shrink: %d >= %d", result.OutputBytes, result.SourceBytes)

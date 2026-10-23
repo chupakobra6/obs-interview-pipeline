@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,33 @@ import (
 	"testing"
 	"time"
 )
+
+func TestVerifyAudioKeepsStrictGateForQuietAAC(t *testing.T) {
+	ffmpeg, ffprobe := audioTools(t)
+	source := filepath.Join(t.TempDir(), "quiet-broadband.m4a")
+	// This quiet, deterministic wideband signal models the recorded background
+	// that AAC96 altered despite retaining almost all of its energy.
+	audioCommand(t, ffmpeg, "-f", "lavfi", "-i",
+		"anoisesrc=sample_rate=48000:duration=4:amplitude=0.002:color=white:seed=246600,highpass=f=1000,lowpass=f=15000,aformat=channel_layouts=stereo",
+		"-c:a", "aac", "-b:a", "160k", source)
+	for _, rate := range []string{"96k", "160k"} {
+		t.Run(rate, func(t *testing.T) {
+			output := filepath.Join(t.TempDir(), "output.m4a")
+			audioCommand(t, ffmpeg, "-i", source, "-af", "volume=2/3", "-c:a", "aac", "-b:a", rate, output)
+			proof, err := verifyFixture(t, ffmpeg, ffprobe, source, output, false)
+			if rate == "96k" {
+				var quality *AudioQualityError
+				if !errors.As(err, &quality) || quality.Metric != "correlation" || proof.Complete {
+					t.Fatalf("low-rate encoding must fail the unchanged content gate: proof=%+v err=%v", proof, err)
+				}
+				return
+			}
+			if err != nil || !proof.Complete || proof.MinimumCorrelation < audioMinimumCorrelation {
+				t.Fatalf("higher-rate encoding must retain the signal: proof=%+v err=%v", proof, err)
+			}
+		})
+	}
+}
 
 func audioTools(t *testing.T) (string, string) {
 	t.Helper()
@@ -182,6 +210,79 @@ func TestVerifyAudioRejectsIncompleteDecodeAndCancellation(t *testing.T) {
 	}
 }
 
+func TestVerifyAudioRejectsMatchingEarlyDecoderEOF(t *testing.T) {
+	ffmpeg, ffprobe := audioTools(t)
+	source := filepath.Join(t.TempDir(), "full.m4a")
+	audioCommand(t, ffmpeg, "-f", "lavfi", "-i", "sine=frequency=443:sample_rate=48000:duration=2", "-c:a", "aac", "-b:a", "160k", source)
+	probe := audioProbe(t, ffprobe, source)
+	if _, known := probe.Audios()[0].AudioEndSeconds(); !known {
+		t.Fatal("MP4 fixture must declare its stream end")
+	}
+	t.Setenv("AUDIO_TEST_FFMPEG", ffmpeg)
+	wrapper := filepath.Join(t.TempDir(), "ffmpeg-wrapper")
+	// Simulate two decoders that report the same short EOF with exit status 0.
+	// Signal comparison alone would accept their identical 400 ms prefixes.
+	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\nexec \"$AUDIO_TEST_FFMPEG\" -t 0.4 \"$@\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"source", "output"} {
+		t.Run(name, func(t *testing.T) {
+			sourceProbe := probe
+			if name == "output" {
+				sourceProbe.Streams = append([]Stream(nil), probe.Streams...)
+				for i := range sourceProbe.Streams {
+					sourceProbe.Streams[i].Duration = ""
+				}
+			}
+			proof, err := VerifyAudio(context.Background(), wrapper, source, source, sourceProbe, probe, false)
+			if err == nil || !strings.Contains(err.Error(), name+" audio stream") || !strings.Contains(err.Error(), "declared end") || proof.Complete {
+				t.Fatalf("matching early EOF must fail declared coverage: proof=%+v err=%v", proof, err)
+			}
+			var quality *AudioQualityError
+			if errors.As(err, &quality) {
+				t.Fatal("early decoder EOF must not trigger a codec-quality retry")
+			}
+		})
+	}
+}
+
+func TestVerifyAudioEarlyEOFDominatesQualityRetry(t *testing.T) {
+	ffmpeg, ffprobe := audioTools(t)
+	dir := t.TempDir()
+	source, output := filepath.Join(dir, "source.m4a"), filepath.Join(dir, "output.m4a")
+	audioCommand(t, ffmpeg, "-f", "lavfi", "-i", "sine=frequency=443:sample_rate=48000:duration=2", "-c:a", "aac", "-b:a", "160k", source)
+	data, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(output, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AUDIO_TEST_FFMPEG", ffmpeg)
+	wrapper := filepath.Join(dir, "ffmpeg-wrapper")
+	script := `#!/bin/sh
+for arg do
+ if [ "$arg" = "$AUDIO_TEST_TRIM" ]; then
+  exec "$AUDIO_TEST_FFMPEG" -t 0.4 "$@"
+ fi
+done
+exec "$AUDIO_TEST_FFMPEG" "$@"
+`
+	if err = os.WriteFile(wrapper, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for name, trimmed := range map[string]string{"source": source, "output": output} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("AUDIO_TEST_TRIM", trimmed)
+			proof, err := verifyFixture(t, wrapper, ffprobe, source, output, false)
+			var quality *AudioQualityError
+			if err == nil || errors.As(err, &quality) || !strings.Contains(err.Error(), name+" audio stream") || !strings.Contains(err.Error(), "declared end") || proof.Complete {
+				t.Fatalf("one-sided early EOF must stop without a quality retry: proof=%+v err=%v", proof, err)
+			}
+		})
+	}
+}
+
 func TestVerifyAudioRejectsUnsupportedChannelsAndProof(t *testing.T) {
 	ffmpeg, ffprobe := audioTools(t)
 	source := audioSource(t, ffmpeg, "anullsrc=r=48000:cl=5.1:d=1")
@@ -229,6 +330,7 @@ func TestAudioVerificationRejectsInvalidCoverage(t *testing.T) {
 	for _, change := range []func(*AudioVerification){
 		func(v *AudioVerification) { v.Complete = false },
 		func(v *AudioVerification) { v.Version++ },
+		func(v *AudioVerification) { v.Version = 1 },
 		func(v *AudioVerification) { v.Windows = 6 },
 		func(v *AudioVerification) { v.ActiveWindows = 6 },
 		func(v *AudioVerification) { v.MinimumCorrelation = 0.5 },
@@ -343,60 +445,75 @@ func TestReviewOffsetGapMix(t *testing.T) {
 
 func TestReviewOutputChangedDuringVerification(t *testing.T) {
 	ffmpeg, ffprobe := audioTools(t)
-	source := audioSource(t, ffmpeg, "sine=frequency=443:sample_rate=48000:duration=4")
-	dir := t.TempDir()
-	output := filepath.Join(dir, "output.mka")
-	replacement := filepath.Join(dir, "silence.mka")
-	audioCommand(t, ffmpeg, "-i", source, "-c:a", "aac", "-b:a", "96k", output)
-	audioCommand(t, ffmpeg, "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono:d=4", "-c:a", "aac", "-b:a", "96k", replacement)
-	originalInfo, err := os.Stat(output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	replacementBytes, err := os.ReadFile(replacement)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if int64(len(replacementBytes)) >= originalInfo.Size() {
-		t.Fatal("replacement must fit original file size")
-	}
-	padded := make([]byte, originalInfo.Size())
-	copy(padded, replacementBytes)
-	if err = os.WriteFile(replacement, padded, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.Chtimes(replacement, originalInfo.ModTime(), originalInfo.ModTime()); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("AUDIO_TEST_FFMPEG", ffmpeg)
-	t.Setenv("AUDIO_TEST_OUTPUT", output)
-	t.Setenv("AUDIO_TEST_REPLACEMENT", replacement)
-	script := `#!/bin/sh
-"$AUDIO_TEST_FFMPEG" "$@"
-result=$?
-for arg do
+	for _, when := range []string{"before-decode", "after-decode"} {
+		t.Run(when, func(t *testing.T) {
+			source := audioSource(t, ffmpeg, "sine=frequency=443:sample_rate=48000:duration=4")
+			dir := t.TempDir()
+			output := filepath.Join(dir, "output.mka")
+			replacement := filepath.Join(dir, "silence.mka")
+			audioCommand(t, ffmpeg, "-i", source, "-c:a", "aac", "-b:a", "96k", output)
+			audioCommand(t, ffmpeg, "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono:d=4", "-c:a", "aac", "-b:a", "96k", replacement)
+			originalInfo, err := os.Stat(output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replacementBytes, err := os.ReadFile(replacement)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if int64(len(replacementBytes)) >= originalInfo.Size() {
+				t.Fatal("replacement must fit original file size")
+			}
+			padded := make([]byte, originalInfo.Size())
+			copy(padded, replacementBytes)
+			if err = os.WriteFile(replacement, padded, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err = os.Chtimes(replacement, originalInfo.ModTime(), originalInfo.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("AUDIO_TEST_FFMPEG", ffmpeg)
+			t.Setenv("AUDIO_TEST_OUTPUT", output)
+			t.Setenv("AUDIO_TEST_REPLACEMENT", replacement)
+			mutation := `for arg do
  if [ "$arg" = "$AUDIO_TEST_OUTPUT" ]; then
   cp -p "$AUDIO_TEST_REPLACEMENT" "$AUDIO_TEST_OUTPUT" || exit 1
   break
  fi
 done
-exit "$result"
 `
-	wrapper := filepath.Join(dir, "ffmpeg-wrapper")
-	if err := os.WriteFile(wrapper, []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	proof, err := verifyFixture(t, wrapper, ffprobe, source, output, false)
-	t.Logf("mutated-output proof=%+v error=%v", proof, err)
-	if err == nil || !strings.Contains(err.Error(), "output changed") {
-		t.Fatalf("want output changed refusal, got %v", err)
-	}
-	afterInfo, err := os.Stat(output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !os.SameFile(originalInfo, afterInfo) || originalInfo.Size() != afterInfo.Size() || !originalInfo.ModTime().Equal(afterInfo.ModTime()) {
-		t.Fatal("fixture did not retain output identity/size/mtime")
+			script := "#!/bin/sh\n"
+			if when == "before-decode" {
+				script += mutation
+			}
+			script += `"$AUDIO_TEST_FFMPEG" "$@"
+result=$?
+`
+			if when == "after-decode" {
+				script += mutation
+			}
+			script += "exit \"$result\"\n"
+			wrapper := filepath.Join(dir, "ffmpeg-wrapper")
+			if err := os.WriteFile(wrapper, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			proof, err := verifyFixture(t, wrapper, ffprobe, source, output, false)
+			t.Logf("mutated-output proof=%+v error=%v", proof, err)
+			if err == nil || !strings.Contains(err.Error(), "output changed") {
+				t.Fatalf("want output changed refusal, got %v", err)
+			}
+			var quality *AudioQualityError
+			if errors.As(err, &quality) {
+				t.Fatal("mutated output must never authorize a codec-quality retry")
+			}
+			afterInfo, err := os.Stat(output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !os.SameFile(originalInfo, afterInfo) || originalInfo.Size() != afterInfo.Size() || !originalInfo.ModTime().Equal(afterInfo.ModTime()) {
+				t.Fatal("fixture did not retain output identity/size/mtime")
+			}
+		})
 	}
 }
 

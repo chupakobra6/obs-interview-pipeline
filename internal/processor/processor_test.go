@@ -24,10 +24,10 @@ func (f transcriberFunc) Transcribe(ctx context.Context, input, work string) (as
 	return f(ctx, input, work)
 }
 
-type compressorFunc func(context.Context, string, string, media.Probe, policy.Options) (Compression, error)
+type compressorFunc func(context.Context, string, string, media.Probe, policy.Options, EncodeSettings) (Compression, error)
 
-func (f compressorFunc) Compress(ctx context.Context, input, output string, source media.Probe, options policy.Options) (Compression, error) {
-	return f(ctx, input, output, source, options)
+func (f compressorFunc) Compress(ctx context.Context, input, output string, source media.Probe, options policy.Options, settings EncodeSettings) (Compression, error) {
+	return f(ctx, input, output, source, options, settings)
 }
 
 func TestPipelineDeletesOnlyAfterValidatedPublish(t *testing.T) {
@@ -155,7 +155,7 @@ func TestPipelineRefusesPublishWhenSourceChangesDuringProcessing(t *testing.T) {
 		t.Fatal("changed source must not be deleted")
 		return nil
 	})
-	pipeline.Compressor = compressorFunc(func(_ context.Context, input, output string, _ media.Probe, _ policy.Options) (Compression, error) {
+	pipeline.Compressor = compressorFunc(func(_ context.Context, input, output string, _ media.Probe, _ policy.Options, _ EncodeSettings) (Compression, error) {
 		if err := os.WriteFile(input, make([]byte, 1200), 0o600); err != nil {
 			return Compression{}, err
 		}
@@ -222,7 +222,7 @@ func TestPipelineFailureKeepsSourceAndPublishesNothing(t *testing.T) {
 		Transcriber: transcriberFunc(func(context.Context, string, string) (asr.Result, error) {
 			return asr.Result{}, errors.New("ASR failed")
 		}),
-		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options) (Compression, error) {
+		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options, _ EncodeSettings) (Compression, error) {
 			compression := Compression{VideoMode: "copy", AudioMode: policy.AudioPreserve, SourceAudioTracks: 1, OutputAudioTracks: 1, AudioBitrateKbps: 96}
 			return compression, os.WriteFile(output, make([]byte, 500), 0o600)
 		}),
@@ -262,7 +262,7 @@ func TestPipelineRetryReusesValidatedCompressionCheckpoint(t *testing.T) {
 			}
 			return asr.Result{Text: "Готово.", SpeechDetected: true, MetalConfirmed: true}, nil
 		}),
-		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options) (Compression, error) {
+		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options, _ EncodeSettings) (Compression, error) {
 			compressions++
 			compression := Compression{VideoMode: "transcode", VideoFilters: []string{"scale=1512:982:flags=lanczos"}, AudioMode: policy.AudioPreserve, SourceAudioTracks: 1, OutputAudioTracks: 1, AudioBitrateKbps: 96}
 			return compression, os.WriteFile(output, make([]byte, 500), 0o600)
@@ -317,7 +317,7 @@ func TestPipelineCompressionFinishesBeforeTranscriptionStarts(t *testing.T) {
 			}
 			return asr.Result{Text: "Последовательно.", SpeechDetected: true, MetalConfirmed: true}, nil
 		}),
-		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options) (Compression, error) {
+		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options, _ EncodeSettings) (Compression, error) {
 			compressed = true
 			compression := Compression{VideoMode: "transcode", AudioMode: policy.AudioPreserve, SourceAudioTracks: 1, OutputAudioTracks: 1, AudioBitrateKbps: 96}
 			return compression, os.WriteFile(output, make([]byte, 500), 0o600)
@@ -346,7 +346,7 @@ func TestPipelineKeepsSourceWhenJobDoesNotRequestDeletion(t *testing.T) {
 		Transcriber: transcriberFunc(func(context.Context, string, string) (asr.Result, error) {
 			return asr.Result{Text: "Исходник остаётся.", SpeechDetected: true, MetalConfirmed: true}, nil
 		}),
-		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options) (Compression, error) {
+		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options, _ EncodeSettings) (Compression, error) {
 			return Compression{VideoMode: "copy", AudioMode: policy.AudioPreserve, SourceAudioTracks: 1, OutputAudioTracks: 1, AudioBitrateKbps: 96}, os.WriteFile(output, make([]byte, 500), 0o600)
 		}),
 		Probe:       fakeProbe(source),
@@ -396,7 +396,7 @@ func successfulPipeline(cfg config.Config, source string, remove RemoveFunc) Pip
 		Transcriber: transcriberFunc(func(context.Context, string, string) (asr.Result, error) {
 			return asr.Result{Text: "Тестовая расшифровка.", SpeechDetected: true, MetalConfirmed: true}, nil
 		}),
-		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options) (Compression, error) {
+		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options, _ EncodeSettings) (Compression, error) {
 			return Compression{VideoMode: "copy", AudioMode: policy.AudioPreserve, SourceAudioTracks: 1, OutputAudioTracks: 1, AudioBitrateKbps: 96}, os.WriteFile(output, make([]byte, 500), 0o600)
 		}),
 		Probe:       fakeProbe(source),
@@ -428,7 +428,7 @@ func TestFFmpegCommandCopiesReadyHEVCAndPreservesAllAudio(t *testing.T) {
 		{CodecType: "audio", CodecName: "aac"},
 		{CodecType: "audio", CodecName: "aac"},
 	}}
-	compression, args, err := (FFmpegCompressor{Config: cfg}).command("input.mp4", "output.mp4", source, policy.Options{AudioMode: policy.AudioPreserve})
+	compression, args, err := (FFmpegCompressor{Config: cfg}).command("input.mp4", "output.mp4", source, policy.Options{AudioMode: policy.AudioPreserve}, EncodeSettings{AudioBitrateKbps: cfg.AudioBitrateKbps})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,10 +436,13 @@ func TestFFmpegCommandCopiesReadyHEVCAndPreservesAllAudio(t *testing.T) {
 		t.Fatalf("unexpected compression: %+v", compression)
 	}
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"-map 0:a", "-c:v copy", "-c:a aac", "-b:a 96k", "-movflags +faststart", "-stats_period 1 -progress output.mp4.progress"} {
+	for _, want := range []string{"-map 1:a:0", "-map 2:a:1", "-map 3:a:2", "-c:v copy", "-c:a aac", "-b:a 96k", "-movflags +faststart", "-stats_period 1 -progress output.mp4.progress"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("ffmpeg args %q missing %q", joined, want)
 		}
+	}
+	if got := strings.Count(joined, "-i input.mp4"); got != 4 {
+		t.Fatalf("preserve uses %d inputs, want video + three independent audio inputs: %s", got, joined)
 	}
 	if strings.Contains(joined, " -vf ") || strings.Contains(joined, "hevc_videotoolbox") {
 		t.Fatalf("ready HEVC unexpectedly filtered or transcoded: %q", joined)
@@ -452,7 +455,7 @@ func TestFFmpegCommandAddsOnlyNecessaryFallbackFilters(t *testing.T) {
 		{CodecType: "video", CodecName: "h264", Width: 3024, Height: 1964, AvgFrameRate: "30/1"},
 		{CodecType: "audio", CodecName: "aac"},
 	}, Format: media.Format{Duration: "60", Size: "6000000"}}
-	compression, args, err := (FFmpegCompressor{Config: cfg}).command("input.mp4", "output.mp4", source, policy.Options{AudioMode: policy.AudioPreserve})
+	compression, args, err := (FFmpegCompressor{Config: cfg}).command("input.mp4", "output.mp4", source, policy.Options{AudioMode: policy.AudioPreserve}, EncodeSettings{AudioBitrateKbps: cfg.AudioBitrateKbps})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,7 +488,7 @@ func TestFFmpegCommandMergesAllAudioTracks(t *testing.T) {
 		{CodecType: "audio", CodecName: "aac"},
 		{CodecType: "audio", CodecName: "aac"},
 	}}
-	compression, args, err := (FFmpegCompressor{Config: cfg}).command("input.mp4", "output.mp4", source, policy.Options{AudioMode: policy.AudioMerge})
+	compression, args, err := (FFmpegCompressor{Config: cfg}).command("input.mp4", "output.mp4", source, policy.Options{AudioMode: policy.AudioMerge}, EncodeSettings{AudioBitrateKbps: cfg.AudioBitrateKbps})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +496,10 @@ func TestFFmpegCommandMergesAllAudioTracks(t *testing.T) {
 		t.Fatalf("unexpected compression: %+v", compression)
 	}
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"[a0][a1][a2]amix=inputs=3", "-map [aout]", "normalize=0", "volume=1/3", "aresample=48000:async=1:first_pts=0"} {
+	if got := strings.Count(joined, "-i input.mp4"); got != 4 {
+		t.Fatalf("merge uses %d demux inputs, want independent video + three audio inputs: %s", got, joined)
+	}
+	for _, want := range []string{"[1:a:0]aresample=", "[2:a:1]aresample=", "[3:a:2]aresample=", "-map 0:v:0", "-map_metadata 0 -map_chapters 0", "[a0][a1][a2]amix=inputs=3", "-map [aout]", "normalize=0", "volume=1/3", "aresample=48000:async=1:first_pts=0"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("ffmpeg args %q missing %q", joined, want)
 		}
@@ -712,5 +718,34 @@ func TestPipelineRefusesPublicationWhenASRStageChangesOutput(t *testing.T) {
 	}
 	if _, err := os.Stat(source); err != nil {
 		t.Fatalf("source missing: %v", err)
+	}
+}
+
+func TestFFmpegCommandSingleAudioStillSeparatesDemux(t *testing.T) {
+	cfg := testConfig(t.TempDir())
+	source := media.Probe{Streams: []media.Stream{
+		{Index: 0, CodecType: "video", CodecName: "hevc", Width: 1512, Height: 982, AvgFrameRate: "30/1"},
+		{Index: 1, CodecType: "audio", CodecName: "aac"},
+	}, Format: media.Format{Duration: "10", Size: "2000000"}}
+	for _, mode := range []string{policy.AudioPreserve, policy.AudioMerge} {
+		for _, force := range []bool{false, true} {
+			t.Run(mode+map[bool]string{false: "/copy", true: "/transcode"}[force], func(t *testing.T) {
+				compression, args, err := (FFmpegCompressor{Config: cfg}).command("input.mp4", "output.mp4", source, policy.Options{AudioMode: mode}, EncodeSettings{AudioBitrateKbps: 96, ForceVideoTranscode: force})
+				if err != nil {
+					t.Fatal(err)
+				}
+				joined := strings.Join(args, " ")
+				if strings.Count(joined, "-i input.mp4") != 2 || !strings.Contains(joined, "-map 0:v:0") || !strings.Contains(joined, "-map 1:a:0") || strings.Contains(joined, "-filter_complex") {
+					t.Fatalf("single audio shares demux or adds mix: %s", joined)
+				}
+				wantMode := "copy"
+				if force {
+					wantMode = "transcode"
+				}
+				if compression.VideoMode != wantMode || compression.OutputAudioTracks != 1 || compression.AudioMode != mode {
+					t.Fatalf("compression=%+v", compression)
+				}
+			})
+		}
 	}
 }

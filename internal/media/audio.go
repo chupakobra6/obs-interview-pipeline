@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	AudioVerificationVersion     = 1
-	AudioVerificationAlgorithm   = "pcm-48k-stereo-window-v1"
+	AudioVerificationVersion     = 2
+	AudioVerificationAlgorithm   = "pcm-48k-stereo-window-v2"
 	audioRate                    = 48000
 	audioWindowMilliseconds      = 200
 	audioWindowFrames            = audioRate * audioWindowMilliseconds / 1000
@@ -24,6 +24,23 @@ const (
 	audioDurationToleranceFrames = 7200 // AAC padding and resampling: 150 ms.
 	maxAudioTracks               = 16
 )
+
+// AudioQualityError reports a decoded signal mismatch that a higher AAC bitrate
+// may resolve. Duration, decode, identity and hash failures never use this type.
+// A retry must still pass the same complete PCM comparison before publication.
+type AudioQualityError struct {
+	AtSeconds float64
+	Channel   int
+	Metric    string
+	Value     float64
+}
+
+func (e *AudioQualityError) Error() string {
+	if e.Metric == "energy" {
+		return fmt.Sprintf("audio energy lost/changed at %.3fs channel %d (ratio %.3f)", e.AtSeconds, e.Channel, e.Value)
+	}
+	return fmt.Sprintf("audio content differs at %.3fs channel %d (correlation %.3f)", e.AtSeconds, e.Channel, e.Value)
+}
 
 // AudioVerification records a complete content comparison and binds it to the
 // exact source and output bytes. Sample counts are stereo frames, not interleaved values.
@@ -166,9 +183,7 @@ func VerifyAudio(ctx context.Context, ffmpeg, input, output string, source, outp
 			}
 		}
 	}
-	if err != nil {
-		return v, err
-	}
+	comparisonErr := err
 	minFrames := v.SourceSamples[0]
 	for _, n := range v.SourceSamples {
 		minFrames = min(minFrames, n)
@@ -195,12 +210,44 @@ func VerifyAudio(ctx context.Context, ffmpeg, input, output string, source, outp
 	if sourceDigest != v.SourceSHA256 {
 		return v, fmt.Errorf("audio source changed during verification (SHA256 mismatch)")
 	}
+	// A codec-quality retry must never hide source/output mutation. Check the
+	// byte identities even when the signal comparison stopped at a mismatch.
+	if comparisonErr != nil {
+		return v, comparisonErr
+	}
+	// Matching decoders can both report an early successful EOF. Compare every
+	// decoded timeline to its own declared stream end before certifying coverage.
+	for _, group := range []struct {
+		name    string
+		streams []Stream
+		samples []int64
+	}{
+		{"source", source.Audios(), v.SourceSamples},
+		{"output", outputProbe.Audios(), v.OutputSamples},
+	} {
+		for i, stream := range group.streams {
+			if err := validateDecodedAudioEnd(group.name, stream, group.samples[i]); err != nil {
+				return v, err
+			}
+		}
+	}
 	v.Complete = true
 	if err = v.validateProof(); err != nil {
 		v.Complete = false
 		return v, err
 	}
 	return v, nil
+}
+
+func validateDecodedAudioEnd(name string, stream Stream, frames int64) error {
+	if end, known := stream.AudioEndSeconds(); known {
+		expected := math.Max(0, end)
+		decoded := float64(frames) / audioRate
+		if math.Abs(decoded-expected) > float64(audioDurationToleranceFrames)/audioRate+1.0/audioRate {
+			return fmt.Errorf("%s audio stream %d decoded end %.3fs differs from declared end %.3fs (150ms tolerance)", name, stream.Index, decoded, expected)
+		}
+	}
+	return nil
 }
 
 func verifyAudioGroup(ctx context.Context, ffmpeg, input, output string, sources []Stream, out Stream, v *AudioVerification, index int, merge bool) error {
@@ -247,6 +294,11 @@ func verifyAudioGroup(ctx context.Context, ffmpeg, input, output string, sources
 				sourceIndex = i
 			}
 			v.SourceSamples[sourceIndex] += int64(n / 2)
+			if dec.done {
+				if err := validateDecodedAudioEnd("source", sources[i], v.SourceSamples[sourceIndex]); err != nil {
+					return err
+				}
+			}
 			for channel := 0; channel < 2; channel++ {
 				energy := 0.0
 				for j := channel; j < n; j += 2 {
@@ -264,6 +316,11 @@ func verifyAudioGroup(ctx context.Context, ffmpeg, input, output string, sources
 			return fmt.Errorf("output audio stream %d: %w", out.Index, err)
 		}
 		v.OutputSamples[index] += int64(len(samples) / 2)
+		if d.done {
+			if err := validateDecodedAudioEnd("output", out, v.OutputSamples[index]); err != nil {
+				return err
+			}
+		}
 		copy(actual, samples)
 		longest = max(longest, len(samples))
 		if longest == 0 {
@@ -291,12 +348,12 @@ func verifyAudioGroup(ctx context.Context, ffmpeg, input, output string, sources
 			active = true
 			ratio := outputRMS / refRMS
 			if ratio < 0.5 || ratio > 2 {
-				return fmt.Errorf("audio energy lost/changed at %.3fs channel %d (ratio %.3f)", float64(window*audioWindowMilliseconds)/1000, channel, ratio)
+				return &AudioQualityError{AtSeconds: float64(window*audioWindowMilliseconds) / 1000, Channel: channel, Metric: "energy", Value: ratio}
 			}
 			corr := audioAlignedCorrelation(ref, got, channel)
 			v.MinimumCorrelation = math.Min(v.MinimumCorrelation, corr)
 			if corr < audioMinimumCorrelation {
-				return fmt.Errorf("audio content differs at %.3fs channel %d (correlation %.3f)", float64(window*audioWindowMilliseconds)/1000, channel, corr)
+				return &AudioQualityError{AtSeconds: float64(window*audioWindowMilliseconds) / 1000, Channel: channel, Metric: "correlation", Value: corr}
 			}
 		}
 		if active {

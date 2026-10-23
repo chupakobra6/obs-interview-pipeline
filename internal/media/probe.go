@@ -19,6 +19,8 @@ type Stream struct {
 	AvgFrameRate string `json:"avg_frame_rate,omitempty"`
 	BitRate      string `json:"bit_rate,omitempty"`
 	Channels     int    `json:"channels,omitempty"`
+	Duration     string `json:"duration,omitempty"`
+	StartTime    string `json:"start_time,omitempty"`
 }
 
 type Format struct {
@@ -34,7 +36,7 @@ type Probe struct {
 func Inspect(ctx context.Context, ffprobeCommand, path string) (Probe, error) {
 	args := []string{
 		"-v", "error",
-		"-show_entries", "format=duration,size:stream=index,codec_type,codec_name,width,height,avg_frame_rate,bit_rate,channels",
+		"-show_entries", "format=duration,size:stream=index,codec_type,codec_name,width,height,avg_frame_rate,bit_rate,channels,duration,start_time",
 		"-of", "json",
 		path,
 	}
@@ -149,6 +151,9 @@ func ValidateCompressed(source, output Probe, width, height, fps, audioBitrateKb
 			return fmt.Errorf("compressed audio stream %d bitrate is %d, want no more than approximately %d", index, bitRate, target)
 		}
 	}
+	if err := validateAudioStreamEnds(source.Audios(), output.Audios(), expectedAudioTracks == 1 && source.AudioCount() > 1); err != nil {
+		return err
+	}
 	sourceDuration := source.DurationSeconds()
 	outputDuration := output.DurationSeconds()
 	tolerance := math.Max(1, sourceDuration*0.01)
@@ -160,6 +165,48 @@ func ValidateCompressed(source, output Probe, width, height, fps, audioBitrateKb
 	}
 	if source.SizeBytes() > 0 && output.SizeBytes() >= source.SizeBytes() {
 		return fmt.Errorf("compressed output is not smaller: %d >= %d bytes", output.SizeBytes(), source.SizeBytes())
+	}
+	return nil
+}
+
+// AudioEndSeconds uses stream metadata only. Formats such as MKV can omit
+// duration, in which case the full PCM comparison remains the required gate.
+func (s Stream) AudioEndSeconds() (float64, bool) {
+	duration, durationErr := strconv.ParseFloat(s.Duration, 64)
+	start, startErr := strconv.ParseFloat(s.StartTime, 64)
+	if durationErr != nil || startErr != nil || duration < 0 || math.IsNaN(duration) || math.IsInf(duration, 0) || math.IsNaN(start) || math.IsInf(start, 0) {
+		return 0, false
+	}
+	end := start + duration
+	return end, !math.IsNaN(end) && !math.IsInf(end, 0)
+}
+
+func validateAudioStreamEnds(source, output []Stream, merge bool) error {
+	const tolerance = 0.150
+	if merge {
+		longestEnd := 0.0
+		for _, audio := range source {
+			end, known := audio.AudioEndSeconds()
+			if !known {
+				return nil
+			}
+			// The merge filter's first_pts=0 trims negative PTS and pads positive PTS.
+			longestEnd = math.Max(longestEnd, end)
+		}
+		if end, known := output[0].AudioEndSeconds(); known && math.Abs(end-longestEnd) > tolerance+1e-9 {
+			return fmt.Errorf("compressed merged audio stream end %.3fs differs from longest source audio end %.3fs (150ms tolerance)", end, longestEnd)
+		}
+		return nil
+	}
+	if len(source) != len(output) {
+		return fmt.Errorf("cannot map %d source audio streams to %d compressed audio streams", len(source), len(output))
+	}
+	for index, audio := range source {
+		sourceEnd, sourceKnown := audio.AudioEndSeconds()
+		outputEnd, outputKnown := output[index].AudioEndSeconds()
+		if sourceKnown && outputKnown && math.Abs(outputEnd-sourceEnd) > tolerance+1e-9 {
+			return fmt.Errorf("compressed audio stream %d end %.3fs differs from source end %.3fs (150ms tolerance)", index, outputEnd, sourceEnd)
+		}
 	}
 	return nil
 }
