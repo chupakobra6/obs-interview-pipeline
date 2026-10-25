@@ -151,7 +151,9 @@ func (c FFmpegCompressor) command(inputPath, outputPath string, source media.Pro
 			"-b:v", fmt.Sprintf("%dk", videoBitrateKbps),
 			"-maxrate", fmt.Sprintf("%dk", videoBitrateKbps),
 			"-bufsize", fmt.Sprintf("%dk", videoBitrateKbps*2),
-			"-realtime", "1", "-prio_speed", "1",
+			// Offline encoding must retain frames even when the bitrate budget
+			// is tight. Real-time VideoToolbox can silently discard them.
+			"-realtime", "0", "-prio_speed", "1",
 		)
 	}
 	args = append(args,

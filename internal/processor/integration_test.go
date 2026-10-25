@@ -8,12 +8,74 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chupakobra6/obs-interview-pipeline/internal/asr"
 	"github.com/chupakobra6/obs-interview-pipeline/internal/config"
 	"github.com/chupakobra6/obs-interview-pipeline/internal/media"
 	"github.com/chupakobra6/obs-interview-pipeline/internal/policy"
 )
+
+func TestDisposableOfflineTranscodePreservesFrameCadence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default(home)
+	if output, err := exec.Command(cfg.FFmpegCommand, "-hide_banner", "-encoders").CombinedOutput(); err != nil || !strings.Contains(string(output), "hevc_videotoolbox") {
+		t.Skip("hevc_videotoolbox unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.mp4")
+	output := filepath.Join(dir, "compressed.mp4")
+	args := []string{
+		"-nostdin", "-v", "error", "-y",
+		"-f", "lavfi", "-i", "testsrc2=size=1512x982:rate=30",
+		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+		"-f", "lavfi", "-i", "sine=frequency=550:sample_rate=48000",
+		"-f", "lavfi", "-i", "sine=frequency=660:sample_rate=48000",
+		"-t", "30", "-map", "0:v:0", "-map", "1:a:0", "-map", "2:a:0", "-map", "3:a:0",
+		"-c:v", "hevc_videotoolbox", "-b:v", "354k", "-realtime", "0",
+		"-c:a", "aac", "-b:a", "160k", source,
+	}
+	if data, err := exec.CommandContext(ctx, cfg.FFmpegCommand, args...).CombinedOutput(); err != nil {
+		t.Fatalf("create synthetic recording: %v: %s", err, data)
+	}
+	p := New(cfg)
+	inputProbe, err := p.Probe(ctx, cfg.FFprobeCommand, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compression, err := p.Compressor.Compress(ctx, source, output, inputProbe, policy.Options{AudioMode: policy.AudioPreserve}, EncodeSettings{AudioBitrateKbps: 96, ForceVideoTranscode: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compression.VideoMode != "transcode" {
+		t.Fatalf("expected offline transcode, got %+v", compression)
+	}
+	outputProbe, err := p.Probe(ctx, cfg.FFprobeCommand, output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := media.ValidateCompressed(inputProbe, outputProbe, cfg.OutputWidth, cfg.OutputHeight, cfg.OutputFPS, 96, 3); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{source, output} {
+		data, err := exec.CommandContext(ctx, cfg.FFprobeCommand, "-v", "error", "-select_streams", "v:0", "-count_packets", "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", path).CombinedOutput()
+		if err != nil || strings.TrimSpace(string(data)) != "900" {
+			t.Fatalf("frame loss in %s: packets=%q, error=%v; want all 900 frames", path, data, err)
+		}
+	}
+	proof, err := p.VerifyAudio(ctx, cfg.FFmpegCommand, source, output, inputProbe, outputProbe, false)
+	if err != nil || !proof.Complete || proof.SourceTracks != 3 || proof.OutputTracks != 3 {
+		t.Fatalf("offline transcode did not preserve all audio: proof=%+v error=%v", proof, err)
+	}
+}
 
 func TestDisposableFFmpegIntegration(t *testing.T) {
 	if testing.Short() {

@@ -463,7 +463,7 @@ func TestFFmpegCommandAddsOnlyNecessaryFallbackFilters(t *testing.T) {
 		t.Fatalf("unexpected compression: %+v", compression)
 	}
 	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "-vf scale=1512:982:flags=lanczos") || !strings.Contains(joined, "-b:v 528k -maxrate 528k -bufsize 1056k") || !strings.Contains(joined, "-realtime 1 -prio_speed 1") || strings.Contains(joined, "fps=30") || strings.Contains(joined, "-q:v") {
+	if !strings.Contains(joined, "-vf scale=1512:982:flags=lanczos") || !strings.Contains(joined, "-b:v 528k -maxrate 528k -bufsize 1056k") || !strings.Contains(joined, "-realtime 0 -prio_speed 1") || strings.Contains(joined, "fps=30") || strings.Contains(joined, "-q:v") {
 		t.Fatalf("unexpected filters: %q", joined)
 	}
 }
