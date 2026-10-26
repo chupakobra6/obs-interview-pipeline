@@ -472,8 +472,13 @@ func TestStageTimeoutsBoundSlowWork(t *testing.T) {
 	if got := compressionTimeout(60); got != minimumCompressionTimeout {
 		t.Fatalf("short compression timeout = %s", got)
 	}
-	if got := compressionTimeout(3600); got != 15*time.Minute {
+	if got := compressionTimeout(3600); got != 30*time.Minute {
 		t.Fatalf("long compression timeout = %s", got)
+	}
+	// A 76-minute Retina interview must allow a valid 3x offline encode plus
+	// full audio verification, while retaining a finite shared deadline.
+	if got := compressionTimeout(4603); got <= 4603*time.Second/3+5*time.Minute || got > 40*time.Minute {
+		t.Fatalf("Retina interview compression timeout = %s", got)
 	}
 	if got := transcriptionTimeout(3600); got != 12*time.Minute {
 		t.Fatalf("long transcription timeout = %s", got)

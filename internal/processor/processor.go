@@ -656,7 +656,10 @@ func (p Pipeline) compressionSettings() compressionSettings {
 }
 
 func compressionTimeout(durationSeconds float64) time.Duration {
-	return stageTimeout(durationSeconds, 4, minimumCompressionTimeout)
+	// Offline HEVC conversion and complete PCM verification share this budget.
+	// Requiring their combined throughput to exceed 4x rejects valid Retina
+	// recordings on a busy Mac before the verification stage can finish.
+	return stageTimeout(durationSeconds, 2, minimumCompressionTimeout)
 }
 
 func transcriptionTimeout(durationSeconds float64) time.Duration {
