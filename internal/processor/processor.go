@@ -609,7 +609,7 @@ func (p Pipeline) validCompressionCheckpoint(
 		checkpoint.SourcePath != inputPath ||
 		checkpoint.SourceIdentity != sourceIdentity ||
 		!reflect.DeepEqual(checkpoint.SourceProbe, sourceProbe) ||
-		checkpoint.Options != options ||
+		checkpoint.Options.AudioMode != options.AudioMode ||
 		checkpoint.Settings != settings {
 		return compressionCheckpoint{}, false
 	}

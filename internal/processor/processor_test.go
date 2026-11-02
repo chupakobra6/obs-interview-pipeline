@@ -242,59 +242,68 @@ func TestPipelineFailureKeepsSourceAndPublishesNothing(t *testing.T) {
 }
 
 func TestPipelineRetryReusesValidatedCompressionCheckpoint(t *testing.T) {
-	dir := t.TempDir()
-	cfg := testConfig(dir)
-	source := filepath.Join(cfg.AllowedInputDir, "retry.mp4")
-	if err := os.MkdirAll(cfg.AllowedInputDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(source, make([]byte, 1000), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	compressions := 0
-	transcriptions := 0
-	pipeline := Pipeline{
-		Config: cfg,
-		Transcriber: transcriberFunc(func(context.Context, string, string) (asr.Result, error) {
-			transcriptions++
-			if transcriptions == 1 {
-				return asr.Result{}, errors.New("retryable ASR failure")
+	for _, deleteOnFirstAttempt := range []bool{false, true} {
+		t.Run(map[bool]string{false: "same-options", true: "retain-source-on-retry"}[deleteOnFirstAttempt], func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := testConfig(dir)
+			source := filepath.Join(cfg.AllowedInputDir, "retry.mp4")
+			if err := os.MkdirAll(cfg.AllowedInputDir, 0o700); err != nil {
+				t.Fatal(err)
 			}
-			return asr.Result{Text: "Готово.", SpeechDetected: true, MetalConfirmed: true}, nil
-		}),
-		Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options, _ EncodeSettings) (Compression, error) {
-			compressions++
-			compression := Compression{VideoMode: "transcode", VideoFilters: []string{"scale=1512:982:flags=lanczos"}, AudioMode: policy.AudioPreserve, SourceAudioTracks: 1, OutputAudioTracks: 1, AudioBitrateKbps: 96}
-			return compression, os.WriteFile(output, make([]byte, 500), 0o600)
-		}),
-		Probe:       fakeProbe(source),
-		VerifyAudio: fakeAudioVerifier,
-		Remove:      os.Remove,
-	}
-	options := policy.Options{AudioMode: policy.AudioPreserve}
-	if _, err := pipeline.Process(context.Background(), source, options); err == nil || !strings.Contains(err.Error(), "retryable ASR failure") {
-		t.Fatalf("first Process() error = %v", err)
-	}
-	resolvedSource, err := pipeline.resolveInputPath(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkpoint := filepath.Join(pipeline.processingDir(resolvedSource), "compression-checkpoint.json")
-	if _, err := os.Stat(checkpoint); err != nil {
-		t.Fatalf("compression checkpoint is unavailable after ASR failure: %v", err)
-	}
-	result, err := pipeline.Process(context.Background(), source, options)
-	if err != nil {
-		t.Fatalf("retry Process() error = %v", err)
-	}
-	if compressions != 1 || transcriptions != 2 {
-		t.Fatalf("stage calls = compression %d, transcription %d; want 1, 2", compressions, transcriptions)
-	}
-	if result.OutputBytes != 500 {
-		t.Fatalf("retry output bytes = %d", result.OutputBytes)
-	}
-	if _, err := os.Stat(filepath.Join(result.FinalDir, "compression-checkpoint.json")); !os.IsNotExist(err) {
-		t.Fatalf("internal checkpoint was published: %v", err)
+			if err := os.WriteFile(source, make([]byte, 1000), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			compressions := 0
+			transcriptions := 0
+			pipeline := Pipeline{
+				Config: cfg,
+				Transcriber: transcriberFunc(func(context.Context, string, string) (asr.Result, error) {
+					transcriptions++
+					if transcriptions == 1 {
+						return asr.Result{}, errors.New("retryable ASR failure")
+					}
+					return asr.Result{Text: "Готово.", SpeechDetected: true, MetalConfirmed: true}, nil
+				}),
+				Compressor: compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options, _ EncodeSettings) (Compression, error) {
+					compressions++
+					compression := Compression{VideoMode: "transcode", VideoFilters: []string{"scale=1512:982:flags=lanczos"}, AudioMode: policy.AudioPreserve, SourceAudioTracks: 1, OutputAudioTracks: 1, AudioBitrateKbps: 96}
+					return compression, os.WriteFile(output, make([]byte, 500), 0o600)
+				}),
+				Probe:       fakeProbe(source),
+				VerifyAudio: fakeAudioVerifier,
+				Remove:      os.Remove,
+			}
+			options := policy.Options{DeleteSource: deleteOnFirstAttempt, AudioMode: policy.AudioPreserve}
+			if _, err := pipeline.Process(context.Background(), source, options); err == nil || !strings.Contains(err.Error(), "retryable ASR failure") {
+				t.Fatalf("first Process() error = %v", err)
+			}
+			resolvedSource, err := pipeline.resolveInputPath(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkpoint := filepath.Join(pipeline.processingDir(resolvedSource), "compression-checkpoint.json")
+			if _, err := os.Stat(checkpoint); err != nil {
+				t.Fatalf("compression checkpoint is unavailable after ASR failure: %v", err)
+			}
+			options.DeleteSource = false
+			result, err := pipeline.Process(context.Background(), source, options)
+			if err != nil {
+				t.Fatalf("retry Process() error = %v", err)
+			}
+			if compressions != 1 || transcriptions != 2 {
+				t.Fatalf("stage calls = compression %d, transcription %d; want 1, 2", compressions, transcriptions)
+			}
+			if _, err := os.Stat(source); err != nil {
+				t.Fatalf("retry must retain source: %v", err)
+			}
+			if result.OutputBytes != 500 {
+				t.Fatalf("retry output bytes = %d", result.OutputBytes)
+			}
+			if _, err := os.Stat(filepath.Join(result.FinalDir, "compression-checkpoint.json")); !os.IsNotExist(err) {
+				t.Fatalf("internal checkpoint was published: %v", err)
+			}
+
+		})
 	}
 }
 
