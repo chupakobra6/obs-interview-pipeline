@@ -241,6 +241,66 @@ func TestPipelineFailureKeepsSourceAndPublishesNothing(t *testing.T) {
 	}
 }
 
+func TestPipelineChoosesASRInputForAudioMode(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode string
+		in, out    int
+		wantMix    bool
+	}{
+		{"merge-two", policy.AudioMerge, 2, 1, true},
+		{"preserve-two", policy.AudioPreserve, 2, 2, false},
+		{"merge-one", policy.AudioMerge, 1, 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t.TempDir())
+			source := filepath.Join(cfg.AllowedInputDir, "interview.mkv")
+			if err := os.MkdirAll(cfg.AllowedInputDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(source, make([]byte, 1000), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			p := successfulPipeline(cfg, source, func(string) error {
+				t.Fatal("source removed with delete_source=false")
+				return nil
+			})
+			resolved, err := p.resolveInputPath(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			probe := p.Probe
+			p.Probe = func(ctx context.Context, command, path string) (media.Probe, error) {
+				result, err := probe(ctx, command, path)
+				tracks := tc.out
+				if path == resolved {
+					tracks = tc.in
+				}
+				if tracks == 2 {
+					result.Streams = append(result.Streams, media.Stream{Index: 2, CodecType: "audio", CodecName: "aac", BitRate: "96000"})
+				}
+				return result, err
+			}
+			p.Compressor = compressorFunc(func(_ context.Context, _, output string, _ media.Probe, _ policy.Options, settings EncodeSettings) (Compression, error) {
+				compression := Compression{VideoMode: "transcode", AudioMode: tc.mode, SourceAudioTracks: tc.in, OutputAudioTracks: tc.out, AudioBitrateKbps: settings.AudioBitrateKbps}
+				return compression, os.WriteFile(output, make([]byte, 500), 0o600)
+			})
+			p.Transcriber = transcriberFunc(func(_ context.Context, input, work string) (asr.Result, error) {
+				want := resolved
+				if tc.wantMix {
+					want = filepath.Join(filepath.Dir(work), "recording.mp4")
+				}
+				if input != want {
+					t.Fatalf("ASR input = %s, want %s", input, want)
+				}
+				return asr.Result{Text: "Тест.", SpeechDetected: true, MetalConfirmed: true}, nil
+			})
+			if _, err := p.Process(context.Background(), source, policy.Options{AudioMode: tc.mode}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestPipelineRetryReusesValidatedCompressionCheckpoint(t *testing.T) {
 	for _, deleteOnFirstAttempt := range []bool{false, true} {
 		t.Run(map[bool]string{false: "same-options", true: "retain-source-on-retry"}[deleteOnFirstAttempt], func(t *testing.T) {
@@ -543,7 +603,7 @@ func fakeAudioVerifier(_ context.Context, _, input, output string, source, out m
 	return media.AudioVerification{
 		Version: media.AudioVerificationVersion, Algorithm: media.AudioVerificationAlgorithm,
 		Complete: true, Merge: merge, SourceTracks: source.AudioCount(), OutputTracks: out.AudioCount(),
-		SampleRate: 48000, WindowMilliseconds: 200, Windows: 50, ActiveWindows: 50,
+		SampleRate: 48000, WindowMilliseconds: 200, Windows: 50 * out.AudioCount(), ActiveWindows: 50 * out.AudioCount(),
 		MinimumDurationSeconds: 10, MinimumCorrelation: 1, SourceSamples: sourceSamples, OutputSamples: outputSamples,
 		OutputSHA256: hex.EncodeToString(digest[:]), SourceSHA256: hex.EncodeToString(sourceDigest[:]),
 	}, nil

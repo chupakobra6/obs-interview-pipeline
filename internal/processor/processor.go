@@ -329,9 +329,14 @@ func (p Pipeline) Process(ctx context.Context, inputPath string, options policy.
 	if err := os.RemoveAll(workDir); err != nil && !os.IsNotExist(err) {
 		return Result{}, fmt.Errorf("reset ASR work directory: %w", err)
 	}
+	asrInput := resolvedInput
+	if options.AudioMode == policy.AudioMerge && sourceProbe.AudioCount() > 1 {
+		// Harvest reads one audio stream. Use the verified mix so that ASR hears all voices.
+		asrInput = tempVideo
+	}
 	asrTimeout := transcriptionTimeout(sourceProbe.DurationSeconds())
 	asrCtx, cancelASR := context.WithTimeout(ctx, asrTimeout)
-	asrResult, err := p.Transcriber.Transcribe(asrCtx, resolvedInput, workDir)
+	asrResult, err := p.Transcriber.Transcribe(asrCtx, asrInput, workDir)
 	asrContextErr := asrCtx.Err()
 	cancelASR()
 	if err != nil {
