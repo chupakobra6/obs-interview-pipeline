@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -88,6 +89,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		printJSON(stdout, job)
 		return 0
+	case "status":
+		cfg, rest, err := loadConfigArgs(home, "status", args[1:])
+		if err != nil || len(rest) != 1 {
+			if err == nil {
+				err = fmt.Errorf("status requires one job ID")
+			}
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
+		status, err := jobqueue.Lookup(cfg, rest[0])
+		if err != nil {
+			fmt.Fprintf(stderr, "status: %v\n", err)
+			if errors.Is(err, jobqueue.ErrInvalidID) {
+				return 2
+			}
+			return 1
+		}
+		printJSON(stdout, status)
+		return 0
 	case "import-sobestech":
 		cfg, cfgPath, rest, err := loadConfigPathArgs(home, "import-sobestech", args[1:])
 		if err != nil || len(rest) != 0 {
@@ -136,7 +156,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 2
 		}
-		result, err := processor.New(cfg).Process(ctx, rest[0], options)
+		var result processor.Result
+		err = jobqueue.WithLock(cfg, func() error {
+			var processErr error
+			result, processErr = processor.New(cfg).Process(ctx, rest[0], options)
+			return processErr
+		})
 		if err != nil {
 			fmt.Fprintf(stderr, "process: %v\n", err)
 			return 1
@@ -306,6 +331,15 @@ func doctor(ctx context.Context, cfg config.Config, stdout io.Writer) error {
 		info, err := os.Stat(tool.path)
 		checks = append(checks, check{Name: tool.name, OK: err == nil && !info.IsDir(), Detail: tool.path})
 	}
+	executable, buildCheckErr := os.Executable()
+	if buildCheckErr == nil {
+		buildCheckErr = checkInstalledBuilds(cfg, executable)
+	}
+	buildDetail := "installed worker and importer match the current executable"
+	if buildCheckErr != nil {
+		buildDetail = buildCheckErr.Error() + "; run make install from the intended checkout"
+	}
+	checks = append(checks, check{Name: "installed-binaries", OK: buildCheckErr == nil, Detail: buildDetail})
 	rootInfo, rootErr := os.Stat(cfg.TelegramHarvestRoot)
 	checks = append(checks, check{Name: "telegram-harvest-root", OK: rootErr == nil && rootInfo.IsDir(), Detail: cfg.TelegramHarvestRoot})
 	sobesTechInfo, sobesTechErr := os.Stat(cfg.SobesTechInputDir)
@@ -345,17 +379,61 @@ func doctor(ctx context.Context, cfg config.Config, stdout io.Writer) error {
 	return nil
 }
 
+func checkInstalledBuilds(cfg config.Config, executable string) error {
+	expected, err := executableDigest(executable)
+	if err != nil {
+		return fmt.Errorf("read current executable: %w", err)
+	}
+	var problems []error
+	for _, path := range []string{installedWorkerPath(cfg), installedImporterPath(cfg)} {
+		actual, err := executableDigest(path)
+		if err != nil {
+			problems = append(problems, fmt.Errorf("read installed executable: %w", err))
+		} else if actual != expected {
+			problems = append(problems, fmt.Errorf("installed executable %q differs from the current build", path))
+		}
+	}
+	return errors.Join(problems...)
+}
+
+func executableDigest(path string) ([sha256.Size]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	return [sha256.Size]byte(hash.Sum(nil)), nil
+}
+
 func runQueue(ctx context.Context, cfg config.Config, stdout, stderr io.Writer) error {
-	return jobqueue.WithLock(cfg, func() error {
+	err := jobqueue.WithLock(cfg, func() error {
 		paths, err := jobqueue.Pending(cfg)
 		if err != nil {
 			return err
 		}
 		pipeline := processor.New(cfg)
 		for _, path := range paths {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			finished, err := jobqueue.RemoveFinishedPending(cfg, path)
+			if err != nil {
+				return err
+			}
+			if finished {
+				continue
+			}
 			job, readErr := jobqueue.Read(path)
+			id := strings.TrimSuffix(filepath.Base(path), ".json")
+			if readErr == nil && job.ID != id {
+				readErr = fmt.Errorf("job %q contains ID %q", id, job.ID)
+			}
 			if readErr != nil {
-				job = jobqueue.Job{ID: strings.TrimSuffix(filepath.Base(path), ".json"), Path: "<invalid>"}
+				job = jobqueue.Job{ID: id, Path: "<invalid>"}
 				if finishErr := jobqueue.Finish(cfg, path, job, readErr); finishErr != nil {
 					return errors.Join(readErr, finishErr)
 				}
@@ -364,6 +442,15 @@ func runQueue(ctx context.Context, cfg config.Config, stdout, stderr io.Writer) 
 			}
 			fmt.Fprintf(stdout, "%s processing %s\n", time.Now().Format(time.RFC3339), job.Path)
 			result, processErr := pipeline.Process(ctx, job.Path, job.Options)
+			if err := ctx.Err(); processErr != nil && err != nil {
+				return err
+			}
+			if processErr == nil {
+				job.Output = &jobqueue.Output{
+					FinalDir: result.FinalDir, VideoPath: result.VideoPath,
+					TranscriptPath: result.TranscriptPath, ManifestPath: result.ManifestPath,
+				}
+			}
 			if finishErr := jobqueue.Finish(cfg, path, job, processErr); finishErr != nil {
 				return errors.Join(processErr, finishErr)
 			}
@@ -381,6 +468,10 @@ func runQueue(ctx context.Context, cfg config.Config, stdout, stderr io.Writer) 
 		}
 		return nil
 	})
+	if errors.Is(err, jobqueue.ErrBusy) {
+		return nil
+	}
+	return err
 }
 
 func notify(cfg config.Config, title, message, targetDir string) error {
@@ -669,6 +760,7 @@ func writeAtomic(path string, payload []byte, mode os.FileMode) error {
 
 func usage(out io.Writer) {
 	fmt.Fprintln(out, "usage: obs-interview-processor <install|doctor|prompt|enqueue|import-sobestech|run-queue|process> [--config path] [--delete-source bool] [--audio-mode preserve|merge] [recording]")
+	fmt.Fprintln(out, "       obs-interview-processor status [--config path] <job-id>")
 }
 
 func printJSON(out io.Writer, value any) {

@@ -25,9 +25,11 @@ import (
 )
 
 const (
-	receiptVersion        = 1
-	maximumImportAttempts = 3
-	dependencyRetryDelay  = 15 * time.Minute
+	receiptVersion               = 1
+	maximumImportAttempts        = 3
+	dependencyRetryDelay         = 15 * time.Minute
+	audioProofManifestVersion    = 4
+	dependencyValidationRevision = "2"
 )
 
 var recordingTimestampPattern = regexp.MustCompile(`_([0-9]{4}-[0-9]{2}-[0-9]{2})_([0-9]{2}-[0-9]{2}-[0-9]{2})\.[0-9]+$`)
@@ -92,12 +94,17 @@ type receipt struct {
 type retryOnTimerError struct{ error }
 
 type finalManifest struct {
-	SourcePath  string         `json:"source_path"`
-	SourceProbe media.Probe    `json:"source_probe"`
-	OutputProbe media.Probe    `json:"output_probe"`
-	Options     policy.Options `json:"options"`
-	Compression struct {
-		OutputAudioTracks int `json:"output_audio_tracks"`
+	Version           int                     `json:"version"`
+	SourcePath        string                  `json:"source_path"`
+	SourceProbe       media.Probe             `json:"source_probe"`
+	OutputProbe       media.Probe             `json:"output_probe"`
+	Options           policy.Options          `json:"options"`
+	AudioVerification media.AudioVerification `json:"audio_verification"`
+	Compression       struct {
+		AudioMode         string `json:"audio_mode"`
+		SourceAudioTracks int    `json:"source_audio_tracks"`
+		OutputAudioTracks int    `json:"output_audio_tracks"`
+		AudioBitrateKbps  int    `json:"audio_bitrate_kbps"`
 	} `json:"compression"`
 }
 
@@ -267,6 +274,7 @@ func (i Importer) importManifest(ctx context.Context, manifestPath string) (Item
 	item.StagingPath = stagingPath
 	receiptPath := i.receiptPath(manifest, expectedVideo, videoInfo)
 	hadPublishedResult := false
+	var validationKey string
 	if saved, ok := readReceipt(receiptPath); ok {
 		item.JobID = saved.JobID
 		item.Status = saved.Status
@@ -288,25 +296,36 @@ func (i Importer) importManifest(ctx context.Context, manifestPath string) (Item
 			return item, "skipped", nil
 		case "already-processed":
 			hadPublishedResult = true
-			if saved.DependencyKey == i.retryDependencies(manifestPath) {
+			validationKey = i.retryDependencies(manifestPath)
+			if saved.DependencyKey == validationKey {
 				return item, "skipped", nil
 			}
 		}
 	}
+	if validationKey == "" {
+		validationKey = i.retryDependencies(manifestPath)
+	}
 	sourceProbe, err := i.Probe(ctx, i.Config.FFprobeCommand, expectedVideo)
+	_, hasVideo := sourceProbe.Video()
+	var valid bool
+	switch {
+	case err != nil:
+		err = fmt.Errorf("probe completed SobesTech video: %w", classifyProbeError(err))
+	case !hasVideo || sourceProbe.AudioCount() == 0 || sourceProbe.DurationSeconds() <= 0:
+		err = fmt.Errorf("completed SobesTech video has invalid media streams")
+	default:
+		valid, err = i.validExistingFinal(ctx, expectedVideo, stagingPath, sourceProbe)
+	}
+	if validationKey != i.retryDependencies(manifestPath) {
+		return item, "", retryOnTimerError{fmt.Errorf("SobesTech dependencies changed during result validation")}
+	}
 	if err != nil {
-		return item, "", fmt.Errorf("probe completed SobesTech video: %w", classifyProbeError(err))
-	}
-	if _, ok := sourceProbe.Video(); !ok || sourceProbe.AudioCount() == 0 || sourceProbe.DurationSeconds() <= 0 {
-		return item, "", fmt.Errorf("completed SobesTech video has invalid media streams")
-	}
-
-	if valid, err := i.validExistingFinal(ctx, stagingPath, sourceProbe); err != nil {
 		return item, "", err
-	} else if valid {
+	}
+	if valid {
 		item.Status = "already-processed"
 		saved := newReceipt(manifest, manifestPath, expectedVideo, videoInfo, stagingPath, item.Status, i.Now())
-		saved.DependencyKey = i.retryDependencies(manifestPath)
+		saved.DependencyKey = validationKey
 		if err := writeJSONAtomic(receiptPath, saved); err != nil {
 			return item, "", err
 		}
@@ -406,7 +425,8 @@ func (i Importer) retryDependencies(manifestPath string) string {
 		fmt.Fprintln(h)
 	}
 	fmt.Fprintf(h, "%d:%d:%d:%d:%d", i.Config.OutputWidth, i.Config.OutputHeight, i.Config.OutputFPS, i.Config.AudioBitrateKbps, i.Config.MaxOutputSizePercent)
-	return fmt.Sprintf("%x", h.Sum(nil))
+	// Validation rules can change even when all recordings and tools stay the same.
+	return fmt.Sprintf("%s:%x", dependencyValidationRevision, h.Sum(nil))
 }
 
 func classifyProbeError(err error) error {
@@ -416,7 +436,7 @@ func classifyProbeError(err error) error {
 	return err
 }
 
-func (i Importer) validExistingFinal(ctx context.Context, stagingPath string, sourceProbe media.Probe) (bool, error) {
+func (i Importer) validExistingFinal(ctx context.Context, sourcePath, stagingPath string, sourceProbe media.Probe) (bool, error) {
 	stem := strings.TrimSuffix(filepath.Base(stagingPath), filepath.Ext(stagingPath))
 	finalDir := filepath.Join(i.Config.OutputDir, stem)
 	if _, err := os.Stat(finalDir); errors.Is(err, os.ErrNotExist) {
@@ -432,21 +452,50 @@ func (i Importer) validExistingFinal(ctx context.Context, stagingPath string, so
 	if err := json.Unmarshal(payload, &saved); err != nil {
 		return false, fmt.Errorf("decode existing pipeline manifest: %w", err)
 	}
-	if filepath.Clean(saved.SourcePath) != filepath.Clean(stagingPath) || !reflect.DeepEqual(saved.SourceProbe, sourceProbe) {
-		return false, fmt.Errorf("existing pipeline result belongs to a different SobesTech source")
+	if filepath.Clean(saved.SourcePath) != filepath.Clean(stagingPath) {
+		return false, fmt.Errorf("existing pipeline result uses a different source path")
 	}
-	expectedOptions := policy.Options{DeleteSource: true, AudioMode: policy.AudioPreserve}
-	if saved.Options != expectedOptions {
-		return false, fmt.Errorf("existing pipeline result uses different processing options")
+	bitrate := i.Config.AudioBitrateKbps
+	expectedAudioTracks := saved.Compression.OutputAudioTracks
+	requiresAudioProof := saved.Version >= audioProofManifestVersion
+	if requiresAudioProof {
+		if err := saved.Options.Validate(); err != nil {
+			return false, fmt.Errorf("invalid existing pipeline processing options: %w", err)
+		}
+		sourceTracks := sourceProbe.AudioCount()
+		merge := saved.Options.AudioMode == policy.AudioMerge
+		expectedAudioTracks = sourceTracks
+		if merge {
+			expectedAudioTracks = 1
+		}
+		proof := saved.AudioVerification
+		if saved.Compression.AudioMode != saved.Options.AudioMode || saved.Compression.SourceAudioTracks != sourceTracks ||
+			saved.Compression.OutputAudioTracks != expectedAudioTracks || proof.Merge != merge ||
+			proof.SourceTracks != sourceTracks || proof.OutputTracks != expectedAudioTracks {
+			return false, fmt.Errorf("existing pipeline audio verification does not cover the selected tracks")
+		}
+		bitrate = saved.Compression.AudioBitrateKbps
+		if bitrate < 32 || bitrate > 320 {
+			return false, fmt.Errorf("invalid existing pipeline AAC bitrate %d", bitrate)
+		}
+	} else {
+		if !reflect.DeepEqual(saved.SourceProbe, sourceProbe) {
+			return false, fmt.Errorf("existing pipeline source probe differs from its legacy manifest")
+		}
+		expectedOptions := policy.Options{DeleteSource: true, AudioMode: policy.AudioPreserve}
+		if saved.Options != expectedOptions {
+			return false, fmt.Errorf("existing pipeline result uses different legacy processing options")
+		}
 	}
-	actualOutput, err := i.Probe(ctx, i.Config.FFprobeCommand, filepath.Join(finalDir, "recording.mp4"))
+	videoPath := filepath.Join(finalDir, "recording.mp4")
+	actualOutput, err := i.Probe(ctx, i.Config.FFprobeCommand, videoPath)
 	if err != nil {
 		return false, fmt.Errorf("probe existing pipeline video: %w", classifyProbeError(err))
 	}
-	if !reflect.DeepEqual(actualOutput, saved.OutputProbe) {
-		return false, fmt.Errorf("existing pipeline video differs from its manifest")
+	if !requiresAudioProof && !reflect.DeepEqual(actualOutput, saved.OutputProbe) {
+		return false, fmt.Errorf("existing pipeline output probe differs from its legacy manifest")
 	}
-	if err := media.ValidateCompressed(sourceProbe, actualOutput, i.Config.OutputWidth, i.Config.OutputHeight, i.Config.OutputFPS, i.Config.AudioBitrateKbps, saved.Compression.OutputAudioTracks); err != nil {
+	if err := media.ValidateCompressed(sourceProbe, actualOutput, i.Config.OutputWidth, i.Config.OutputHeight, i.Config.OutputFPS, bitrate, expectedAudioTracks); err != nil {
 		return false, fmt.Errorf("validate existing pipeline video: %w", err)
 	}
 	if err := media.ValidateSizeLimit(sourceProbe, actualOutput, i.Config.MaxOutputSizePercent); err != nil {
@@ -455,6 +504,14 @@ func (i Importer) validExistingFinal(ctx context.Context, stagingPath string, so
 	transcriptInfo, err := os.Stat(filepath.Join(finalDir, "transcript.md"))
 	if err != nil || !transcriptInfo.Mode().IsRegular() || transcriptInfo.Size() == 0 {
 		return false, fmt.Errorf("existing pipeline transcript is unavailable")
+	}
+	if requiresAudioProof {
+		if err := saved.AudioVerification.ValidateSource(ctx, sourcePath); err != nil {
+			return false, fmt.Errorf("verify existing pipeline result against the SobesTech source: %w", err)
+		}
+		if err := saved.AudioVerification.ValidateOutput(ctx, videoPath); err != nil {
+			return false, fmt.Errorf("verify existing pipeline output: %w", err)
+		}
 	}
 	return true, nil
 }

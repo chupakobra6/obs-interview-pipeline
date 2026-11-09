@@ -193,7 +193,7 @@ func TestAdaptiveAudioExhaustionKeepsSourceAndFailureReceipt(t *testing.T) {
 	}
 }
 
-func TestAdaptiveAudioCopySizeFallbackUsesSameRate(t *testing.T) {
+func TestAdaptiveAudioVerifiesCopyBeforeVideoFallback(t *testing.T) {
 	f := newAdaptiveFixture(t)
 	base := f.p.Compressor
 	f.p.Compressor = compressorFunc(func(ctx context.Context, input, output string, source media.Probe, options policy.Options, settings EncodeSettings) (Compression, error) {
@@ -203,15 +203,22 @@ func TestAdaptiveAudioCopySizeFallbackUsesSameRate(t *testing.T) {
 		}
 		return base.Compress(ctx, input, output, source, options, settings)
 	})
+	f.qualityUntil(128)
+	verify := f.p.VerifyAudio
+	var verified []EncodeSettings
+	f.p.VerifyAudio = func(ctx context.Context, command, input, output string, source, out media.Probe, merge bool) (media.AudioVerification, error) {
+		verified = append(verified, f.calls[len(f.calls)-1])
+		return verify(ctx, command, input, output, source, out, merge)
+	}
 	result, err := f.p.Process(context.Background(), f.source, policy.Options{AudioMode: policy.AudioMerge})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []EncodeSettings{{AudioBitrateKbps: 96}, {AudioBitrateKbps: 96, ForceVideoTranscode: true}}
-	if !reflect.DeepEqual(f.calls, want) || result.Compression.VideoMode != "transcode" || result.Compression.AudioBitrateKbps != 96 {
-		t.Fatalf("attempts=%+v compression=%+v", f.calls, result.Compression)
+	want := []EncodeSettings{{AudioBitrateKbps: 96}, {AudioBitrateKbps: 128}, {AudioBitrateKbps: 128, ForceVideoTranscode: true}}
+	if !reflect.DeepEqual(f.calls, want) || !reflect.DeepEqual(verified, want) || result.Compression.VideoMode != "transcode" || result.Compression.AudioBitrateKbps != 128 {
+		t.Fatalf("attempts=%+v verified=%+v compression=%+v", f.calls, verified, result.Compression)
 	}
-	if len(result.Compression.FailedAttempts) != 1 {
+	if len(result.Compression.FailedAttempts) != 2 {
 		t.Fatalf("failed attempts=%+v", result.Compression.FailedAttempts)
 	}
 }
@@ -332,7 +339,7 @@ func TestFFmpegForceTranscodeUsesActualAudioBudget(t *testing.T) {
 	}
 }
 
-func TestAdaptiveAudioBoundsCopyFallbackAndQualityFailures(t *testing.T) {
+func TestAdaptiveAudioRejectsOversizeCopiesWithBadSoundWithoutTranscoding(t *testing.T) {
 	f := newAdaptiveFixture(t)
 	base := f.p.Compressor
 	f.p.Compressor = compressorFunc(func(ctx context.Context, input, output string, source media.Probe, options policy.Options, settings EncodeSettings) (Compression, error) {
@@ -344,14 +351,14 @@ func TestAdaptiveAudioBoundsCopyFallbackAndQualityFailures(t *testing.T) {
 	})
 	f.qualityUntil(1000)
 	_, err := f.p.Process(context.Background(), f.source, policy.Options{AudioMode: policy.AudioMerge, DeleteSource: true})
-	if err == nil || !strings.Contains(err.Error(), "after 12 bounded attempts") {
+	if err == nil || !strings.Contains(err.Error(), "after 6 bounded attempts") {
 		t.Fatalf("error=%v", err)
 	}
-	if len(f.calls) != 12 || f.asrCalls != 0 {
+	if len(f.calls) != 6 || f.asrCalls != 0 {
 		t.Fatalf("compression=%d ASR=%d", len(f.calls), f.asrCalls)
 	}
-	for i := 0; i < len(f.calls); i += 2 {
-		if f.calls[i].ForceVideoTranscode || !f.calls[i+1].ForceVideoTranscode || f.calls[i].AudioBitrateKbps != f.calls[i+1].AudioBitrateKbps {
+	for _, attempt := range f.calls {
+		if attempt.ForceVideoTranscode {
 			t.Fatalf("attempts=%+v", f.calls)
 		}
 	}
@@ -363,9 +370,11 @@ func TestAdaptiveAudioBoundsCopyFallbackAndQualityFailures(t *testing.T) {
 func TestAdaptiveAudioOversizeTranscodeStopsBeforePCMAndASR(t *testing.T) {
 	f := newAdaptiveFixture(t)
 	f.size = 900
-	f.p.VerifyAudio = func(context.Context, string, string, string, media.Probe, media.Probe, bool) (media.AudioVerification, error) {
-		t.Fatal("PCM verification ran on oversize transcode")
-		return media.AudioVerification{}, nil
+	f.p.VerifyAudio = func(ctx context.Context, command, input, output string, source, out media.Probe, merge bool) (media.AudioVerification, error) {
+		if f.calls[len(f.calls)-1].ForceVideoTranscode {
+			t.Fatal("PCM verification ran on oversize transcode")
+		}
+		return fakeAudioVerifier(ctx, command, input, output, source, out, merge)
 	}
 	_, err := f.p.Process(context.Background(), f.source, policy.Options{AudioMode: policy.AudioMerge, DeleteSource: true})
 	if err == nil || !strings.Contains(err.Error(), "size limit") {

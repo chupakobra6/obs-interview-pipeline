@@ -38,13 +38,44 @@ func TestQueueLifecycle(t *testing.T) {
 	if err != nil || len(paths) != 0 {
 		t.Fatalf("Pending() after finish = %v, %v", paths, err)
 	}
-	failedPath := filepath.Join(cfg.FailedDir(), filepath.Base(pathsOrOriginal(cfg, job.ID)))
+	failedPath := filepath.Join(cfg.FailedDir(), job.ID+".json")
 	failed, err := Read(failedPath)
 	if err != nil || failed.Error != jobErr.Error() {
 		t.Fatalf("failed job = %#v, %v", failed, err)
 	}
+	status, err := Lookup(cfg, job.ID)
+	if err != nil || status.Status != "failed" || status.Error != jobErr.Error() || status.Output != nil {
+		t.Fatalf("failed status = %#v, %v", status, err)
+	}
 }
 
-func pathsOrOriginal(cfg config.Config, id string) string {
-	return filepath.Join(cfg.QueueDir(), id+".json")
+func TestPublishQueuedJobDoesNotOverwrite(t *testing.T) {
+	cfg := config.Config{StateDir: t.TempDir()}
+	job := Job{ID: "same-id", Path: "/tmp/original.mp4", Options: policy.Options{AudioMode: policy.AudioPreserve}}
+	if err := publishQueuedJob(cfg, job); err != nil {
+		t.Fatal(err)
+	}
+	replacement := job
+	replacement.Path = "/tmp/replacement.mp4"
+	if err := publishQueuedJob(cfg, replacement); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("publish with existing ID: %v", err)
+	}
+	status, err := Lookup(cfg, job.ID)
+	if err != nil || status.Status != "queued" || status.Path != job.Path || status.Options != job.Options {
+		t.Fatalf("original job was not preserved: %#v, %v", status, err)
+	}
+}
+
+func TestLookupLegacyRejectedJob(t *testing.T) {
+	cfg := config.Config{StateDir: t.TempDir()}
+	if err := os.MkdirAll(cfg.FailedDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.FailedDir(), "rejected.json"), []byte(`{"id":"rejected","path":"<invalid>","options":{"delete_source":false,"audio_mode":""},"finished_at":"2026-11-09T12:00:00+03:00","error":"decode job: unexpected end of JSON input"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status, err := Lookup(cfg, "rejected")
+	if err != nil || status.Status != "failed" || status.Error != "decode job: unexpected end of JSON input" || status.Output != nil {
+		t.Fatalf("legacy rejected status = %#v, %v", status, err)
+	}
 }

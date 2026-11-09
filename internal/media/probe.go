@@ -114,6 +114,7 @@ func MatchesFrameRate(video Stream, fps int) bool {
 	return math.Abs(FrameRate(video.AvgFrameRate)-float64(fps)) <= 0.02
 }
 
+// ValidateCompressed checks streams and duration. Publishing also requires ValidateSizeLimit.
 func ValidateCompressed(source, output Probe, width, height, fps, audioBitrateKbps, expectedAudioTracks int) error {
 	video, ok := output.Video()
 	if !ok {
@@ -162,9 +163,6 @@ func ValidateCompressed(source, output Probe, width, height, fps, audioBitrateKb
 	}
 	if output.SizeBytes() <= 0 {
 		return fmt.Errorf("compressed output is empty")
-	}
-	if source.SizeBytes() > 0 && output.SizeBytes() >= source.SizeBytes() {
-		return fmt.Errorf("compressed output is not smaller: %d >= %d bytes", output.SizeBytes(), source.SizeBytes())
 	}
 	return nil
 }

@@ -546,14 +546,9 @@ func (p Pipeline) compressAttempts(ctx context.Context, inputPath, videoPath str
 			if err != nil {
 				return Compression{}, media.Probe{}, media.AudioVerification{}, fmt.Errorf("probe compressed output: %w", err)
 			}
-			// An oversize copy can use the same AAC target with a bounded video budget.
-			if err := media.ValidateSizeLimit(source, output, p.Config.MaxOutputSizePercent); err != nil {
-				if compression.VideoMode == "copy" && !settings.ForceVideoTranscode {
-					failed = append(failed, CompressionAttempt{rate, compression.VideoMode, err.Error()})
-					settings.ForceVideoTranscode = true
-					continue
-				}
-				return Compression{}, media.Probe{}, media.AudioVerification{}, fmt.Errorf("validate compressed output: %w", err)
+			sizeErr := media.ValidateSizeLimit(source, output, p.Config.MaxOutputSizePercent)
+			if sizeErr != nil && (compression.VideoMode != "copy" || source.SizeBytes() <= 0 || output.SizeBytes() <= 0) {
+				return Compression{}, media.Probe{}, media.AudioVerification{}, fmt.Errorf("validate compressed output: %w", sizeErr)
 			}
 			if err := media.ValidateCompressed(source, output, p.Config.OutputWidth, p.Config.OutputHeight, p.Config.OutputFPS, rate, compression.OutputAudioTracks); err != nil {
 				return Compression{}, media.Probe{}, media.AudioVerification{}, fmt.Errorf("validate compressed output: %w", err)
@@ -582,6 +577,13 @@ func (p Pipeline) compressAttempts(ctx context.Context, inputPath, videoPath str
 			}
 			if err := verification.ValidateSource(ctx, inputPath); err != nil {
 				return Compression{}, media.Probe{}, media.AudioVerification{}, fmt.Errorf("invalid source audio verification; source kept: %w", err)
+			}
+			// The video fallback keeps this AAC target. Verify the sound before
+			// spending time on video encoding, then verify the new file again.
+			if sizeErr != nil {
+				failed = append(failed, CompressionAttempt{rate, compression.VideoMode, sizeErr.Error()})
+				settings.ForceVideoTranscode = true
+				continue
 			}
 			compression.FailedAttempts = failed
 			return compression, output, verification, nil

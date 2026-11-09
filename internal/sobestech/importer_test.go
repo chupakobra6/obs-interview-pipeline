@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -172,6 +173,177 @@ func TestImporterTracksExistingValidatedResultWithoutReimport(t *testing.T) {
 	}
 	if _, err := os.Stat(staging); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("lost published result must not stage a second user prompt: %v", err)
+	}
+}
+
+func TestImporterAdoptsPublishedMergeWithVerifiedSourceAndOutput(t *testing.T) {
+	for _, test := range []struct {
+		name               string
+		alter              func(*finalManifest)
+		wantErr            string
+		seedOldReceipts    bool
+		replaceDuringProbe bool
+	}{
+		{name: "keep and merge at saved AAC target"},
+		{name: "reconsider exhausted and accepted receipts from before upgrade", seedOldReceipts: true},
+		{name: "retry when published manifest is replaced during validation", replaceDuringProbe: true},
+		{
+			name:    "same probe but different source bytes",
+			alter:   func(saved *finalManifest) { saved.AudioVerification.SourceSHA256 = strings.Repeat("1", 64) },
+			wantErr: "source SHA256 mismatch",
+		},
+		{
+			name:    "same probe but different output bytes",
+			alter:   func(saved *finalManifest) { saved.AudioVerification.OutputSHA256 = strings.Repeat("1", 64) },
+			wantErr: "output SHA256 mismatch",
+		},
+		{
+			name:    "incomplete audio proof",
+			alter:   func(saved *finalManifest) { saved.AudioVerification.Complete = false },
+			wantErr: "incomplete or unsupported audio verification",
+		},
+		{
+			name:    "different source path",
+			alter:   func(saved *finalManifest) { saved.SourcePath += ".other" },
+			wantErr: "different source path",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := importerTestConfig(t.TempDir())
+			source, manifestPath := writeCompletedRecording(t, cfg, "Interview_2026-09-07_11-00-20.004", "completed")
+			importer := New(cfg)
+			now := time.Now()
+			importer.Now = func() time.Time { return now }
+			staging, err := importer.stagingPath(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			finalDir := filepath.Join(cfg.OutputDir, "2026-09-07 11-00-20")
+			output := filepath.Join(finalDir, "recording.mp4")
+			if err := os.MkdirAll(finalDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(output, make([]byte, 500), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(finalDir, "transcript.md"), []byte("# transcript\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			sourceHash, err := hashFile(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			outputHash, err := hashFile(output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sourceProbe := sourceTestProbe()
+			sourceProbe.Streams = append(sourceProbe.Streams, media.Stream{Index: 2, CodecType: "audio", CodecName: "aac"})
+			outputProbe := media.Probe{
+				Streams: []media.Stream{
+					{CodecType: "video", CodecName: "hevc", Width: 1512, Height: 982, AvgFrameRate: "30/1"},
+					{CodecType: "audio", CodecName: "aac", BitRate: "128000"},
+				},
+				Format: media.Format{Duration: "60", Size: "500"},
+			}
+			saved := finalManifest{
+				Version: audioProofManifestVersion, SourcePath: staging, SourceProbe: sourceProbe, OutputProbe: outputProbe,
+				Options: policy.Options{DeleteSource: false, AudioMode: policy.AudioMerge},
+				AudioVerification: media.AudioVerification{
+					Version: media.AudioVerificationVersion, Algorithm: media.AudioVerificationAlgorithm,
+					Complete: true, Merge: true, SourceTracks: 2, OutputTracks: 1,
+					SampleRate: 48000, WindowMilliseconds: 200, Windows: 300, ActiveWindows: 300,
+					MinimumDurationSeconds: 60, MinimumCorrelation: 1,
+					SourceSamples: []int64{2880000, 2880000}, OutputSamples: []int64{2880000},
+					SourceSHA256: sourceHash, OutputSHA256: outputHash,
+				},
+			}
+			saved.Compression.AudioMode = policy.AudioMerge
+			saved.Compression.SourceAudioTracks = 2
+			saved.Compression.OutputAudioTracks = 1
+			saved.Compression.AudioBitrateKbps = 128
+			if test.alter != nil {
+				test.alter(&saved)
+			}
+			finalManifestPath := filepath.Join(finalDir, "manifest.json")
+			if err := writeJSONAtomic(finalManifestPath, saved); err != nil {
+				t.Fatal(err)
+			}
+			sourceInfo, err := os.Stat(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest := sourceManifest{ID: "recording-id"}
+			receiptPath := importer.receiptPath(manifest, source, sourceInfo)
+			retryPath, err := importer.retryReceiptPath(manifestPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.seedOldReceipts {
+				oldKey := strings.TrimPrefix(importer.retryDependencies(manifestPath), dependencyValidationRevision+":")
+				exhausted := receipt{
+					Version: receiptVersion, Status: "failed", Attempts: maximumImportAttempts,
+					ManifestPath: manifestPath, DependencyKey: oldKey,
+				}
+				if err := writeJSONAtomic(retryPath, exhausted); err != nil {
+					t.Fatal(err)
+				}
+				accepted := newReceipt(manifest, manifestPath, source, sourceInfo, staging, "already-processed", now)
+				accepted.DependencyKey = oldKey
+				if err := writeJSONAtomic(receiptPath, accepted); err != nil {
+					t.Fatal(err)
+				}
+			}
+			replaceDuringProbe := test.replaceDuringProbe
+			importer.Probe = func(_ context.Context, _ string, path string) (media.Probe, error) {
+				if path == source {
+					return sourceProbe, nil
+				}
+				if replaceDuringProbe {
+					replaceDuringProbe = false
+					if err := writeJSONAtomic(finalManifestPath, saved); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return outputProbe, nil
+			}
+			importer.Prompt = func(string) error {
+				t.Fatal("existing published output opened a processing prompt")
+				return nil
+			}
+			report, err := importer.Import(t.Context())
+			if test.replaceDuringProbe {
+				if err == nil || !strings.Contains(err.Error(), "dependencies changed during result validation") || report.Errors != 1 {
+					t.Fatalf("unstable import = %+v, %v, want retry", report, err)
+				}
+				if _, err := os.Stat(receiptPath); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("unstable validation was cached: %v", err)
+				}
+				if retry, ok := readReceipt(retryPath); !ok || retry.Status != "retrying" {
+					t.Fatalf("unstable validation retry = %+v, present=%v", retry, ok)
+				}
+				now = now.Add(30 * time.Second)
+				report, err = importer.Import(t.Context())
+			}
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) || report.Errors != 1 {
+					t.Fatalf("import = %+v, %v, want error containing %q", report, err, test.wantErr)
+				}
+				return
+			}
+			if err != nil || len(report.Items) != 1 || report.Items[0].Status != "already-processed" {
+				t.Fatalf("import = %+v, %v, want already-processed", report, err)
+			}
+			if _, err := os.Stat(staging); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("published result was staged again: %v", err)
+			}
+			if accepted, ok := readReceipt(receiptPath); !ok || accepted.DependencyKey != importer.retryDependencies(manifestPath) {
+				t.Fatalf("published result receipt = %+v, present=%v", accepted, ok)
+			}
+			if _, err := os.Stat(retryPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("successful validation kept the retry receipt: %v", err)
+			}
+		})
 	}
 }
 

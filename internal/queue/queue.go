@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,7 +24,25 @@ type Job struct {
 	EnqueuedAt time.Time      `json:"enqueued_at"`
 	FinishedAt time.Time      `json:"finished_at,omitempty"`
 	Error      string         `json:"error,omitempty"`
+	Output     *Output        `json:"output,omitempty"`
 }
+
+type Output struct {
+	FinalDir       string `json:"final_dir"`
+	VideoPath      string `json:"video_path"`
+	TranscriptPath string `json:"transcript_path"`
+	ManifestPath   string `json:"manifest_path"`
+}
+
+type Status struct {
+	Status string `json:"status"`
+	Job
+}
+
+var (
+	ErrBusy      = errors.New("processor is busy; another process or queue worker holds the lock")
+	ErrInvalidID = errors.New("job ID must be a non-empty file basename")
+)
 
 func Enqueue(cfg config.Config, inputPath string, options policy.Options) (Job, error) {
 	if err := options.Validate(); err != nil {
@@ -43,14 +62,27 @@ func Enqueue(cfg config.Config, inputPath string, options policy.Options) (Job, 
 	hash := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%d", absPath, info.ModTime().UnixNano(), info.Size())))
 	id := fmt.Sprintf("%020d-%s", time.Now().UnixNano(), hex.EncodeToString(hash[:6]))
 	job := Job{ID: id, Path: absPath, Options: options, EnqueuedAt: time.Now()}
-	if err := os.MkdirAll(cfg.QueueDir(), 0o700); err != nil {
-		return Job{}, fmt.Errorf("create queue directory: %w", err)
-	}
-	path := filepath.Join(cfg.QueueDir(), id+".json")
-	if err := writeExclusiveJSON(path, job); err != nil {
+	if err := publishQueuedJob(cfg, job); err != nil {
 		return Job{}, err
 	}
 	return job, nil
+}
+
+func publishQueuedJob(cfg config.Config, job Job) error {
+	if err := os.MkdirAll(cfg.QueueDir(), 0o700); err != nil {
+		return fmt.Errorf("create queue directory: %w", err)
+	}
+	// launchd watches queue/ for any entries. Stage outside it so an interrupted
+	// enqueue cannot wake the worker for a partial file.
+	tempPath, err := stageJSON(cfg.StateDir, job)
+	if err != nil {
+		return fmt.Errorf("stage queued job: %w", err)
+	}
+	defer os.Remove(tempPath)
+	if err := os.Link(tempPath, filepath.Join(cfg.QueueDir(), job.ID+".json")); err != nil {
+		return fmt.Errorf("publish queued job: %w", err)
+	}
+	return nil
 }
 
 func Pending(cfg config.Config) ([]string, error) {
@@ -72,6 +104,17 @@ func Pending(cfg config.Config) ([]string, error) {
 }
 
 func Read(path string) (Job, error) {
+	job, err := readJob(path)
+	if err != nil {
+		return Job{}, err
+	}
+	if err := job.Options.Validate(); err != nil {
+		return Job{}, fmt.Errorf("job options: %w", err)
+	}
+	return job, nil
+}
+
+func readJob(path string) (Job, error) {
 	payload, err := os.ReadFile(path)
 	if err != nil {
 		return Job{}, fmt.Errorf("read job: %w", err)
@@ -83,44 +126,80 @@ func Read(path string) (Job, error) {
 	if strings.TrimSpace(job.ID) == "" || strings.TrimSpace(job.Path) == "" {
 		return Job{}, fmt.Errorf("job is missing id or path")
 	}
-	if err := job.Options.Validate(); err != nil {
-		return Job{}, fmt.Errorf("job options: %w", err)
-	}
 	return job, nil
+}
+
+func Lookup(cfg config.Config, id string) (Status, error) {
+	if id == "" || id == "." || id == ".." || id != strings.TrimSpace(id) || strings.ContainsAny(id, "/\\\x00") {
+		return Status{}, ErrInvalidID
+	}
+	// Read the queue first: Finish publishes the receipt before removing the
+	// queue entry, so a transition cannot look like a missing job.
+	queued, queueErr := readStatus(cfg.QueueDir(), id, "queued")
+	terminal, err := terminalStatus(cfg, id)
+	if !errors.Is(err, os.ErrNotExist) {
+		return terminal, err
+	}
+	if errors.Is(queueErr, os.ErrNotExist) {
+		return Status{}, fmt.Errorf("job %q not found: %w", id, os.ErrNotExist)
+	}
+	return queued, queueErr
+}
+
+func terminalStatus(cfg config.Config, id string) (Status, error) {
+	done, err := readStatus(cfg.DoneDir(), id, "done")
+	if !errors.Is(err, os.ErrNotExist) {
+		return done, err
+	}
+	return readStatus(cfg.FailedDir(), id, "failed")
+}
+
+func readStatus(dir, id, state string) (Status, error) {
+	// Failed receipts for rejected jobs can contain invalid processing options.
+	job, err := readJob(filepath.Join(dir, id+".json"))
+	if err != nil {
+		return Status{}, fmt.Errorf("read %s receipt: %w", state, err)
+	}
+	if job.ID != id {
+		return Status{}, fmt.Errorf("%s receipt for job %q contains ID %q", state, id, job.ID)
+	}
+	return Status{Status: state, Job: job}, nil
+}
+
+// RemoveFinishedPending discards a queue entry left behind after its receipt
+// was published. The worker calls it while holding the processor lock.
+func RemoveFinishedPending(cfg config.Config, queuePath string) (bool, error) {
+	id := strings.TrimSuffix(filepath.Base(queuePath), ".json")
+	if _, err := terminalStatus(cfg, id); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := os.Remove(queuePath); err != nil {
+		return false, fmt.Errorf("remove finished job from queue: %w", err)
+	}
+	return true, nil
 }
 
 func Finish(cfg config.Config, queuePath string, job Job, runErr error) error {
 	job.FinishedAt = time.Now()
+	job.Error = ""
 	destinationDir := cfg.DoneDir()
 	if runErr != nil {
 		destinationDir = cfg.FailedDir()
 		job.Error = runErr.Error()
+		job.Output = nil
 	}
 	if err := os.MkdirAll(destinationDir, 0o700); err != nil {
 		return fmt.Errorf("create job destination: %w", err)
 	}
 	destination := filepath.Join(destinationDir, filepath.Base(queuePath))
-	temp, err := os.CreateTemp(destinationDir, ".job-*.json")
+	tempPath, err := stageJSON(destinationDir, job)
 	if err != nil {
-		return fmt.Errorf("create job result: %w", err)
+		return fmt.Errorf("stage job result: %w", err)
 	}
-	tempPath := temp.Name()
 	defer os.Remove(tempPath)
-	payload, err := json.MarshalIndent(job, "", "  ")
-	if err == nil {
-		payload = append(payload, '\n')
-		_, err = temp.Write(payload)
-	}
-	if err == nil {
-		err = temp.Sync()
-	}
-	closeErr := temp.Close()
-	if err != nil {
-		return fmt.Errorf("write job result: %w", err)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close job result: %w", closeErr)
-	}
 	if err := os.Rename(tempPath, destination); err != nil {
 		return fmt.Errorf("publish job result: %w", err)
 	}
@@ -141,8 +220,8 @@ func WithLock(cfg config.Config, action func() error) error {
 	}
 	defer file.Close()
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		if err == syscall.EWOULDBLOCK {
-			return nil
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return ErrBusy
 		}
 		return fmt.Errorf("lock queue: %w", err)
 	}
@@ -150,15 +229,15 @@ func WithLock(cfg config.Config, action func() error) error {
 	return action()
 }
 
-func writeExclusiveJSON(path string, value any) error {
+func stageJSON(dir string, value any) (string, error) {
 	payload, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode queued job: %w", err)
+		return "", fmt.Errorf("encode job: %w", err)
 	}
 	payload = append(payload, '\n')
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, err := os.CreateTemp(dir, ".job-*")
 	if err != nil {
-		return fmt.Errorf("create queued job: %w", err)
+		return "", fmt.Errorf("create temporary job file: %w", err)
 	}
 	_, writeErr := file.Write(payload)
 	if writeErr == nil {
@@ -166,12 +245,12 @@ func writeExclusiveJSON(path string, value any) error {
 	}
 	closeErr := file.Close()
 	if writeErr != nil {
-		_ = os.Remove(path)
-		return fmt.Errorf("write queued job: %w", writeErr)
+		_ = os.Remove(file.Name())
+		return "", fmt.Errorf("write job: %w", writeErr)
 	}
 	if closeErr != nil {
-		_ = os.Remove(path)
-		return fmt.Errorf("close queued job: %w", closeErr)
+		_ = os.Remove(file.Name())
+		return "", fmt.Errorf("close job: %w", closeErr)
 	}
-	return nil
+	return file.Name(), nil
 }
